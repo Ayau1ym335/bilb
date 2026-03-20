@@ -73,8 +73,8 @@ void avoidObstacles() {
   }
 
   if (back < OBSTACLE_DIST_CM) {
-    stopMotors();
-    Serial.println(F("[NAV] Obstacle BACK -> stop"));
+    moveForward(); // Rear obstacle — move away from it
+    Serial.println(F("[NAV] Obstacle BACK -> move forward"));
     return;
   }
 
@@ -103,8 +103,7 @@ bool checkEmergencyConditions() {
     return true;
   }
   
-  if (sensorData.edgeDetected &&
-      sensorData.distFront > OBSTACLE_DIST_CM) {
+  if (sensorData.edgeDetected) {
     Serial.println(F("[NAV] EMRG: edge detected!"));
     return true;
   }

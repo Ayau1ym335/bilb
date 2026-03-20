@@ -94,3 +94,10 @@ enum RobotState : uint8_t {
   STATE_SCANNING       = 1,  
   STATE_EMERGENCY_STOP = 2  
 };
+
+// ── WiFi / UDP Telemetry ──────────────────────────────
+#define WIFI_SSID       "YOUR_SSID"
+#define WIFI_PASSWORD   "YOUR_PASSWORD"
+#define UDP_HOST        "192.168.1.100"   // PC / dashboard IP
+#define UDP_PORT        4210
+#define WIFI_TIMEOUT_MS 10000UL            // Max wait for connection

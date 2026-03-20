@@ -7,6 +7,11 @@
 unsigned long lastProfileUpdate = 0;
 static int scanCount = 0;
 
+// Forward declarations for round helpers (defined at bottom of file)
+static float round1(float v);
+static float round2(float v);
+static float round3(float v);
+
 static const char* issuesBuf[10];
 static int issueCount = 0;
 
@@ -77,7 +82,7 @@ void assessDegradation() {
   if (status == STATUS_OK && score >= 30.0f) {
     status = STATUS_WARNING;
   }
-  if (status == STATUS_WARNING && score >= 60.0f) {
+  if (status < STATUS_CRITICAL && score >= 60.0f) {
     status = STATUS_CRITICAL;
   }
 
@@ -148,14 +153,20 @@ void generateJSONProfile() {
     }
   }
 
+  // ── Serial output ─────────────────────────────────────
   Serial.print(F("[JSON] "));
   serializeJson(doc, Serial);
   Serial.println();
 
- 
   Serial.println(F("[JSON_PRETTY]"));
   serializeJsonPretty(doc, Serial);
   Serial.println();
+
+  // ── UDP telemetry ──────────────────────────────────────
+  String jsonOut;
+  jsonOut.reserve(512);
+  serializeJson(doc, jsonOut);
+  sendUDP(jsonOut);
 }
 
 static float round1(float v) { return roundf(v * 10.0f)  / 10.0f; }

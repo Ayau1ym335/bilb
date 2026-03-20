@@ -31,6 +31,8 @@ void avoidObstacles();
 bool checkEmergencyConditions();
 void generateJSONProfile();
 void assessDegradation();
+void initWiFi();
+void sendUDP(const String& payload);
 extern unsigned long lastProfileUpdate; 
 
 void setup() {
@@ -62,9 +64,10 @@ void setup() {
     display.display();
   }
 
-  // Подсистемы датчиков и моторов
+  // Подсистемы датчиков, моторов и WiFi
   initSensors();
   initMotors();
+  initWiFi();
 
   // Дефолтный профиль
   buildingProfile.status = STATUS_OK;

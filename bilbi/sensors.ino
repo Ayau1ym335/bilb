@@ -34,11 +34,12 @@ void initSensors() {
     Serial.println(F("[SENS] ERROR: BH1750 not found at 0x23"));
   }
 
-  pinMode(US_FRONT_TRIG, OUTPUT);
-  pinMode(US_BACK_TRIG,  OUTPUT);
-  pinMode(US_LEFT_TRIG,  OUTPUT);
-  pinMode(US_RIGHT_TRIG, OUTPUT);
+  pinMode(US_FRONT_TRIG, OUTPUT); pinMode(US_FRONT_ECHO, INPUT);
+  pinMode(US_BACK_TRIG,  OUTPUT); pinMode(US_BACK_ECHO,  INPUT);
+  pinMode(US_LEFT_TRIG,  OUTPUT); pinMode(US_LEFT_ECHO,  INPUT);
+  pinMode(US_RIGHT_TRIG, OUTPUT); pinMode(US_RIGHT_ECHO, INPUT);
 
+  // EDGE_PIN (GPIO 36) is input-only on ESP32 — no pinMode needed
   pinMode(VIBRATION_PIN, INPUT);
   Serial.println(F("[SENS] Init complete."));
 }
@@ -101,11 +102,11 @@ void readAllSensors() {
 
   // ── HC-SR04 (4 направления) 
   sensorData.distFront = readUltrasonic(US_FRONT_TRIG, US_FRONT_ECHO);
-  delayMicroseconds(10000);  // 10 мс — минимальная задержка между сенсорами
+  delay(10);  // 10 ms inter-sensor gap (use delay() not delayMicroseconds() for >=1ms)
   sensorData.distBack  = readUltrasonic(US_BACK_TRIG,  US_BACK_ECHO);
-  delayMicroseconds(10000);
+  delay(10);
   sensorData.distLeft  = readUltrasonic(US_LEFT_TRIG,  US_LEFT_ECHO);
-  delayMicroseconds(10000);
+  delay(10);
   sensorData.distRight = readUltrasonic(US_RIGHT_TRIG, US_RIGHT_ECHO);
 
   // ── SW-420 (Вибрация) 
