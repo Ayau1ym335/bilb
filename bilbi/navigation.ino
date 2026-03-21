@@ -1,112 +1,272 @@
-static unsigned long lastNavUpdate = 0;
+#include "Config.h"
+
+static unsigned long s_navLastMs  = 0;
+static unsigned long s_poseLastMs = 0;
+static unsigned long s_wpLastMs   = 0;
+
+#define MAX_WAYPOINTS 32
+static Waypoint s_wpQueue[MAX_WAYPOINTS];
+static uint8_t  s_wpCount   = 0;
+static uint8_t  s_wpIdx     = 0;
+static bool     s_wpRunning = false;
+
+enum class MotionState : uint8_t {
+  STOPPED, FORWARD, BACKWARD, TURN_LEFT, TURN_RIGHT
+};
+static MotionState s_motionState = MotionState::STOPPED;
+
+static void setMotorRaw(bool lFwd, bool lBwd, bool rFwd, bool rBwd,
+                         uint8_t speedL = MOTOR_SPEED_FULL,
+                         uint8_t speedR = MOTOR_SPEED_FULL) {
+  digitalWrite(PIN_L_IN1, lFwd ? HIGH : LOW);
+  digitalWrite(PIN_L_IN2, lBwd ? HIGH : LOW);
+  digitalWrite(PIN_R_IN3, rFwd ? HIGH : LOW);
+  digitalWrite(PIN_R_IN4, rBwd ? HIGH : LOW);
+
+#if MOTORS_USE_PWM
+  uint8_t sL = (lFwd || lBwd) ? speedL : 0;
+  uint8_t sR = (rFwd || rBwd) ? speedR : 0;
+  ledcWrite(LEDC_L_CH, sL);
+  ledcWrite(LEDC_R_CH, sR);
+#endif
+}
+
+void motorForward(uint8_t spd) {
+  setMotorRaw(true, false, true, false, spd, spd);
+  s_motionState = MotionState::FORWARD;
+}
+
+void motorBackward(uint8_t spd) {
+  setMotorRaw(false, true, false, true, spd, spd);
+  s_motionState = MotionState::BACKWARD;
+}
+
+void motorTurnLeft(uint8_t spd) {
+  setMotorRaw(false, true, true, false, spd, spd);
+  s_motionState = MotionState::TURN_LEFT;
+}
+
+void motorTurnRight(uint8_t spd) {
+  setMotorRaw(true, false, false, true, spd, spd);
+  s_motionState = MotionState::TURN_RIGHT;
+}
+
+void motorCurve(float bias, uint8_t baseSpd) {
+  bias = constrain(bias, -1.0f, 1.0f);
+  uint8_t sL = (uint8_t)constrain(baseSpd * (1.0f - max(0.0f,  bias)), 0, 255);
+  uint8_t sR = (uint8_t)constrain(baseSpd * (1.0f - max(0.0f, -bias)), 0, 255);
+  setMotorRaw(true, false, true, false, sL, sR);
+  s_motionState = MotionState::FORWARD;
+}
+
+void motorStop() {
+  setMotorRaw(false, false, false, false, 0, 0);
+  s_motionState = MotionState::STOPPED;
+}
+
+void updatePose() {
+  unsigned long now = millis();
+  if (s_poseLastMs == 0) { s_poseLastMs = now; return; }
+
+  float dt = (now - s_poseLastMs) / 1000.0f;  
+  s_poseLastMs = now;
+
+  switch (s_motionState) {
+
+    case MotionState::FORWARD: {
+      float dMM   = ROBOT_SPEED_MM_S * dt;
+      float dCells = dMM / GRID_CELL_MM;
+      float rad    = (g_pose.headingDeg - 90.0f) * DEG_TO_RAD;
+      g_pose.x += cosf(rad) * dCells;
+      g_pose.y -= sinf(rad) * dCells;  
+      break;
+    }
+
+    case MotionState::BACKWARD: {
+      float dMM   = ROBOT_SPEED_MM_S * 0.85f * dt; 
+      float dCells = dMM / GRID_CELL_MM;
+      float rad    = (g_pose.headingDeg - 90.0f) * DEG_TO_RAD;
+      g_pose.x -= cosf(rad) * dCells;
+      g_pose.y += sinf(rad) * dCells;
+      break;
+    }
+
+    case MotionState::TURN_LEFT:
+      g_pose.headingDeg -= ROBOT_TURN_RATE_DEG_S * dt;
+      break;
+
+    case MotionState::TURN_RIGHT:
+      g_pose.headingDeg += ROBOT_TURN_RATE_DEG_S * dt;
+      break;
+
+    default: break;
+  }
+''
+  while (g_pose.headingDeg <    0.0f) g_pose.headingDeg += 360.0f;
+  while (g_pose.headingDeg >= 360.0f) g_pose.headingDeg -= 360.0f;
+
+  // Границы сетки
+  g_pose.x = constrain(g_pose.x, 0.0f, (float)(GRID_COLS - 1));
+  g_pose.y = constrain(g_pose.y, 0.0f, (float)(GRID_ROWS - 1));
+}
+
+void reactiveAvoid() {
+  unsigned long now = millis();
+  if (now - s_navLastMs < IVMS_NAV) return;
+  s_navLastMs = now;
+
+  float f = g_sensor.distFront;
+  float b = g_sensor.distBack;
+  float l = g_sensor.distLeft;
+  float r = g_sensor.distRight;
+
+  if (f < DIST_OBSTACLE_CM && b < DIST_OBSTACLE_CM) {
+    motorStop();
+    return;
+  }
+
+  if (f < DIST_OBSTACLE_CM) {
+    motorStop();
+    delayMicroseconds(50000); 
+    (l > r) ? motorTurnLeft(MOTOR_SPEED_TURN)
+             : motorTurnRight(MOTOR_SPEED_TURN);
+    return;
+  }
+
+  if (b < DIST_OBSTACLE_CM && s_motionState == MotionState::BACKWARD) {
+    motorStop(); return;
+  }
+
+  if (l < DIST_CAUTION_CM || r < DIST_CAUTION_CM) {
+    float bias = 0.0f;
+    if (l < DIST_CAUTION_CM && r >= DIST_CAUTION_CM)
+      bias =  (DIST_CAUTION_CM - l) / DIST_CAUTION_CM;
+    if (r < DIST_CAUTION_CM && l >= DIST_CAUTION_CM)
+      bias = -(DIST_CAUTION_CM - r) / DIST_CAUTION_CM;
+    motorCurve(bias * 0.6f, MOTOR_SPEED_FULL);
+    return;
+  }
+
+  motorForward(MOTOR_SPEED_FULL);
+}
+
+bool isEmergency() {
+  if (fabsf(g_sensor.tiltRoll)  > THR_TILT_CRIT) {
+    Serial.println(F("[NAV] EMRG: critical roll"));
+    return true;
+  }
+  if (fabsf(g_sensor.tiltPitch) > THR_TILT_CRIT) {
+    Serial.println(F("[NAV] EMRG: critical pitch"));
+    return true;
+  }
+  if (g_sensor.distFront < 8.0f && g_sensor.distBack < 8.0f) {
+    Serial.println(F("[NAV] EMRG: trapped <8cm"));
+    return true;
+  }
+  return false;
+}
+
+bool wpAddPoint(float x, float y) {
+  if (s_wpCount >= MAX_WAYPOINTS) return false;
+  s_wpQueue[s_wpCount++] = { x, y };
+  return true;
+}
+
+void wpClear() {
+  s_wpCount = 0; s_wpIdx = 0; s_wpRunning = false;
+  motorStop();
+}
+
+bool wpStart() {
+  if (s_wpCount == 0) return false;
+  s_wpIdx = 0; s_wpRunning = true;
+  Serial.printf("[WP] Mission start: %d waypoints\n", s_wpCount);
+  return true;
+}
+
+bool wpIsRunning() { return s_wpRunning; }
+uint8_t wpCurrentIdx() { return s_wpIdx; }
+uint8_t wpCount()    { return s_wpCount; }
+
+static float wrapAngle(float deg) {
+  while (deg >  180.0f) deg -= 360.0f;
+  while (deg < -180.0f) deg += 360.0f;
+  return deg;
+}
+
+void wpTick() {
+  if (!s_wpRunning) return;
+  unsigned long now = millis();
+  if (now - s_wpLastMs < IVMS_WP_NAV) return;
+  s_wpLastMs = now;
+
+  if (s_wpIdx >= s_wpCount) {
+    s_wpRunning = false;
+    motorStop();
+    Serial.println(F("[WP] Mission complete."));
+    return;
+  }
+
+  if (isEmergency()) {
+    s_wpRunning = false;
+    motorStop();
+    return;
+  }
+
+  Waypoint& tgt = s_wpQueue[s_wpIdx];
+  float dx = tgt.x - g_pose.x;
+  float dy = tgt.y - g_pose.y;
+  float dist = sqrtf(dx*dx + dy*dy);
+
+  if (dist < WP_REACH_CELLS) {
+    Serial.printf("[WP] Reached #%d (%.1f,%.1f)\n",
+                  s_wpIdx + 1, tgt.x, tgt.y);
+    s_wpIdx++;
+    motorStop();
+    return;
+  }
+
+  if (g_sensor.distFront < DIST_OBSTACLE_CM) {
+    (g_sensor.distLeft > g_sensor.distRight)
+      ? motorTurnLeft(MOTOR_SPEED_TURN)
+      : motorTurnRight(MOTOR_SPEED_TURN);
+    return;
+  }
+
+  float targetHdg = atan2f(dx, -dy) * RAD_TO_DEG;
+  if (targetHdg < 0.0f) targetHdg += 360.0f;
+
+  float hdgErr = wrapAngle(targetHdg - g_pose.headingDeg);
+
+  if (fabsf(hdgErr) > WP_HEADING_TOL_DEG) {
+    uint8_t tSpd = map((int)fabsf(hdgErr), (int)WP_HEADING_TOL_DEG, 90,
+                        MOTOR_SPEED_SLOW, MOTOR_SPEED_TURN);
+    tSpd = constrain(tSpd, MOTOR_SPEED_SLOW, MOTOR_SPEED_TURN);
+    (hdgErr > 0) ? motorTurnRight(tSpd) : motorTurnLeft(tSpd);
+  } else {
+  
+    uint8_t fSpd = (dist < 1.0f)
+                   ? MOTOR_SPEED_SLOW
+                   : MOTOR_SPEED_FULL;
+    motorForward(fSpd);
+  }
+}
 
 void initMotors() {
-  pinMode(MOTOR_L_IN1, OUTPUT);
-  pinMode(MOTOR_L_IN2, OUTPUT);
-  pinMode(MOTOR_R_IN3, OUTPUT);
-  pinMode(MOTOR_R_IN4, OUTPUT);
-  stopMotors();
-  Serial.println(F("[NAV] Motors OK"));
-}
+  pinMode(PIN_L_IN1, OUTPUT); pinMode(PIN_L_IN2, OUTPUT);
+  pinMode(PIN_R_IN3, OUTPUT); pinMode(PIN_R_IN4, OUTPUT);
 
-static inline void setLeftMotors(bool fwd, bool bwd) {
-  digitalWrite(MOTOR_L_IN1, fwd  ? HIGH : LOW);
-  digitalWrite(MOTOR_L_IN2, bwd  ? HIGH : LOW);
-}
+#if MOTORS_USE_PWM
+  ledcSetup(LEDC_L_CH, LEDC_FREQ, LEDC_RES);
+  ledcSetup(LEDC_R_CH, LEDC_FREQ, LEDC_RES);
+  ledcAttachPin(PIN_L_ENA, LEDC_L_CH);
+  ledcAttachPin(PIN_R_ENB, LEDC_R_CH);
+  Serial.println(F("[NAV] Motors OK  (PWM mode)"));
+#else
+  Serial.println(F("[NAV] Motors OK  (digital mode)"));
+  Serial.println(F("[NAV] TIP: set MOTORS_USE_PWM=true for speed control"));
+#endif
 
-static inline void setRightMotors(bool fwd, bool bwd) {
-  digitalWrite(MOTOR_R_IN3, fwd  ? HIGH : LOW);
-  digitalWrite(MOTOR_R_IN4, bwd  ? HIGH : LOW);
-}
-
-void moveForward() {
-  setLeftMotors(true, false);
-  setRightMotors(true, false);
-}
-
-void moveBackward() {
-  setLeftMotors(false, true);
-  setRightMotors(false, true);
-}
-
-void turnLeft() {
-  setLeftMotors(false, true);
-  setRightMotors(true, false);
-}
-
-void turnRight() {
-  setLeftMotors(true, false);
-  setRightMotors(false, true);
-}
-
-void stopMotors() {
-  setLeftMotors(false, false);
-  setRightMotors(false, false);
-}
-
-void avoidObstacles() {
-  unsigned long now = millis();
-  if (now - lastNavUpdate < INTERVAL_NAV_MS) return;
-  lastNavUpdate = now;
-
-  float front = sensorData.distFront;
-  float back  = sensorData.distBack;
-  float left  = sensorData.distLeft;
-  float right = sensorData.distRight;
-
-  if (sensorData.edgeDetected) {
-    moveBackward();
-    Serial.println(F("[NAV] EDGE detected -> backward"));
-    return;
-  }
-
-  if (front < OBSTACLE_DIST_CM) {
-    stopMotors();
-    if (left >= right) {
-      turnLeft();
-      Serial.println(F("[NAV] Obstacle front -> turn LEFT"));
-    } else {
-      turnRight();
-      Serial.println(F("[NAV] Obstacle front -> turn RIGHT"));
-    }
-    return;
-  }
-
-  if (back < OBSTACLE_DIST_CM) {
-    moveForward(); // Rear obstacle — move away from it
-    Serial.println(F("[NAV] Obstacle BACK -> move forward"));
-    return;
-  }
-
-  if (left < CAUTION_DIST_CM && left < right) {
-    turnRight();
-    return;
-  }
-
-  if (right < CAUTION_DIST_CM && right < left) {
-    turnLeft();
-    return;
-  }
-
-  moveForward();
-}
-
-bool checkEmergencyConditions() {
-  if (fabsf(sensorData.tiltAngle) > TILT_CRITICAL_DEG) {
-    Serial.println(F("[NAV] EMRG: critical tilt!"));
-    return true;
-  }
-
-  if (sensorData.distFront < 10.0f &&
-      sensorData.distBack  < 10.0f) {
-    Serial.println(F("[NAV] EMRG: trapped!"));
-    return true;
-  }
-  
-  if (sensorData.edgeDetected) {
-    Serial.println(F("[NAV] EMRG: edge detected!"));
-    return true;
-  }
-
-  return false;
+  motorStop();
+  g_pose = { 1.0f, 1.0f, 0.0f };  
 }
