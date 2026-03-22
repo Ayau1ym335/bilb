@@ -1,388 +1,423 @@
+"""
+ingestion/bridge.py  —  Serial / WebSocket → DB Bridge
+═══════════════════════════════════════════════════════
+Задача: слушать ESP32 локально (Serial или WebSocket) и
+писать данные в ту же БД что и FastAPI.
+
+Два режима (переключается через BRIDGE_MODE в .env):
+  · serial     — читать [JSON] строки из USB-Serial
+  · websocket  — подключиться к ESP32 WS (ws://192.168.4.1:81)
+  · demo       — генерировать синтетические данные (без железа)
+
+Запуск:
+  python -m ingestion.bridge                  # из корня проекта
+  python -m ingestion.bridge --mode serial --port /dev/ttyUSB0
+  python -m ingestion.bridge --mode websocket
+  python -m ingestion.bridge --mode demo
+
+▶ НАСТРОЙТЕ в .env:
+  BRIDGE_MODE=serial             # serial | websocket | demo
+  SERIAL_PORT=/dev/ttyUSB0       # Windows: COM3
+  SERIAL_BAUD=115200
+  WS_URL=ws://192.168.4.1:81
+  DEMO_INTERVAL_S=2.0
+"""
+
+from __future__ import annotations
+
 import argparse
+import asyncio
 import json
+import logging
 import math
-import random
-import threading
-import time
 import os
+import random
+import sys
+import time
 from datetime import datetime, timezone
 
-import serial
 from dotenv import load_dotenv
-from sqlalchemy import (Column, DateTime, Float, Integer, String,
-                        Text, create_engine, desc)
-from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
+from pydantic import ValidationError
+
+# Относительный импорт работает при запуске через python -m
+from .database import create_tables, db_session
+from .repository import (
+    get_or_create_session,
+    insert_reading,
+    refresh_building_aggregates,
+)
+from .schemas import TelemetryPayload
 
 load_dotenv()
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./data/bilb.db")
+log = logging.getLogger("bilb.bridge")
 
-# Гарантируем, что папка data существует
-os.makedirs("data", exist_ok=True)
+# ── Настройки ─────────────────────────────────────────────────
+BRIDGE_MODE:      str   = os.getenv("BRIDGE_MODE",      "serial")
+SERIAL_PORT:      str   = os.getenv("SERIAL_PORT",      "/dev/ttyUSB0")   # ▶ НАСТРОЙТЕ
+SERIAL_BAUD:      int   = int(os.getenv("SERIAL_BAUD",  "115200"))
+WS_URL:           str   = os.getenv("WS_URL",           "ws://192.168.4.1:81")
+DEMO_INTERVAL_S:  float = float(os.getenv("DEMO_INTERVAL_S", "2.0"))
+BUILDING_ID:      str   = os.getenv("BUILDING_ID",      "BILB_001")
 
-engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
-SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
+# Каждые N пакетов пересчитываем агрегаты
+AGGREGATE_EVERY_N: int  = int(os.getenv("AGGREGATE_EVERY_N", "10"))
+
+# Переподключение при разрыве
+RECONNECT_DELAY_S: float = 5.0
+MAX_RECONNECT:     int   = 999
 
 
-class Base(DeclarativeBase):
-    pass
+# ══════════════════════════════════════════════════════════════
+#  Общая логика: разбор пакета → сохранение в БД
+# ══════════════════════════════════════════════════════════════
+_packet_counter: int = 0
 
 
-class SensorReading(Base):
+async def process_packet(raw: str) -> bool:
     """
-    Одна запись с робота. Соответствует JSON-схеме из ESP32.
-    Схема согласована (День 1, Точка синхронизации).
+    Принимает сырую строку (от Serial или WS).
+    Ищет JSON: строки с префиксом [JSON], или чистый JSON.
+    Возвращает True если пакет успешно сохранён.
     """
-    __tablename__ = "sensor_readings"
+    global _packet_counter
 
-    id           = Column(Integer, primary_key=True, index=True)
-    building_id  = Column(String(50), index=True, default="BILB_001")
-    scan_id      = Column(Integer)
-    received_at  = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    raw = raw.strip()
+    if not raw:
+        return False
 
-    # Environmental (BME280)
-    temperature  = Column(Float, nullable=True)
-    humidity     = Column(Float, nullable=True)
-    pressure     = Column(Float, nullable=True)
-    light_lux    = Column(Float, nullable=True)
+    # Извлекаем JSON из строки вида "[JSON] {...}"
+    if raw.startswith("[JSON]"):
+        raw = raw[len("[JSON]"):].strip()
 
-    # Structural (MPU6050 + SW-420)
-    tilt_deg     = Column(Float, nullable=True)
-    accel_x      = Column(Float, nullable=True)
-    accel_y      = Column(Float, nullable=True)
-    accel_z      = Column(Float, nullable=True)
-    vibration    = Column(Integer, default=0)   # 0 / 1
+    # Отбрасываем строки не являющиеся JSON
+    if not raw.startswith("{"):
+        return False
 
-    # Spatial (HC-SR04)
-    dist_front   = Column(Float, nullable=True)
-    dist_back    = Column(Float, nullable=True)
-    dist_left    = Column(Float, nullable=True)
-    dist_right   = Column(Float, nullable=True)
-    edge         = Column(Integer, default=0)
-
-    # Assessment (заполняется после ML-обработки)
-    status       = Column(String(20), default="UNKNOWN")
-    score        = Column(Float, nullable=True)
-    issues       = Column(Text, nullable=True)    # JSON-массив строк
-
-
-class BuildingProfile(Base):
-    """
-    Агрегированный «Цифровой профиль» объекта.
-    Обновляется после каждой сессии сканирования.
-    """
-    __tablename__ = "building_profiles"
-
-    id               = Column(Integer, primary_key=True, index=True)
-    building_id      = Column(String(50), unique=True, index=True)
-    name             = Column(String(200))
-    city             = Column(String(100))
-    year_built       = Column(Integer)
-    updated_at       = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-
-    avg_temperature  = Column(Float, nullable=True)
-    avg_humidity     = Column(Float, nullable=True)
-    avg_light        = Column(Float, nullable=True)
-    max_tilt         = Column(Float, nullable=True)
-    vibration_events = Column(Integer, default=0)
-    total_scans      = Column(Integer, default=0)
-
-    overall_status   = Column(String(20), default="UNKNOWN")
-    degradation_score = Column(Float, default=0.0)
-    scenarios_json   = Column(Text, nullable=True)    # JSON от Gemini
-    sustainability_json = Column(Text, nullable=True) # CO2 расчёты
-
-
-# Создаём таблицы при первом запуске
-Base.metadata.create_all(bind=engine)
-
-
-# ──────────────────────────────────────────────────────────────────
-#  JSON Schema (согласовано с ESP32 прошивкой)
-# ──────────────────────────────────────────────────────────────────
-AGREED_SCHEMA = {
-    "building_id": str,
-    "scan_id": int,
-    "timestamp_ms": int,
-    "status": str,
-    "score": float,
-    "environmental": {
-        "temperature_c": float,
-        "humidity_pct": float,
-        "pressure_hpa": float,
-        "light_lux": float,
-    },
-    "structural": {
-        "tilt_deg": float,
-        "accel_x": float,
-        "accel_y": float,
-        "accel_z": float,
-        "vibration": bool,
-    },
-    "spatial": {
-        "front_cm": float,
-        "back_cm": float,
-        "left_cm": float,
-        "right_cm": float,
-        "edge": bool,
-    },
-    "issues": list,
-}
-
-
-def parse_esp32_json(raw_line: str) -> dict | None:
-    """
-    Парсит строку вида '[JSON] {...}'.
-    Возвращает dict или None при ошибке.
-    """
-    line = raw_line.strip()
-    if not line.startswith("[JSON]"):
-        return None
+    # Parse JSON once and reuse the result.
+    # WS-сервер шлёт ack/state/error/wp_reached — не сохраняем в БД.
+    # Telemetry пакеты: либо нет поля "type", либо type=="telem".
     try:
-        json_str = line[len("[JSON]"):].strip()
-        return json.loads(json_str)
+        data = json.loads(raw)
     except json.JSONDecodeError as e:
-        print(f"[BRIDGE] JSON parse error: {e} | raw: {line[:80]}")
-        return None
+        log.warning("JSON decode error: %s | raw=%.80s", e, raw)
+        return False
+
+    _pkt_type = data.get("type", "")
+    if _pkt_type and _pkt_type != "telem":
+        return False   # ack, state, error, wp_reached, mission_complete
+
+    # Валидация через Pydantic
+    try:
+        payload = TelemetryPayload.model_validate(data)
+    except ValidationError as e:
+        log.warning("Payload validation error: %s", e.errors()[0])
+        return False
+
+    # Запись в БД
+    try:
+        async with db_session() as db:
+            session = await get_or_create_session(
+                db, payload.building_id, fw_version=payload.v
+            )
+            reading = await insert_reading(
+                db, payload, session_id=session.id, raw_json=raw[:2000]
+            )
+            _packet_counter += 1
+
+            if _packet_counter % AGGREGATE_EVERY_N == 0:
+                await refresh_building_aggregates(db, payload.building_id)
+
+            # Человекочитаемый лог
+            pos_str = (
+                f"X{payload.pos.x:.1f}Y{payload.pos.y:.1f}"
+                if payload.pos else "pos=?"
+            )
+            status_icon = {"OK": "🟢", "WARNING": "🟡", "CRITICAL": "🔴"}.get(
+                reading.status or "", "⚪"
+            )
+            log.info(
+                "[%s] #%d %s %s  score=%.1f  T=%.1f° H=%.1f%%",
+                payload.building_id,
+                _packet_counter,
+                status_icon,
+                pos_str,
+                reading.score or 0,
+                payload.env.t if payload.env else 0,
+                payload.env.h if payload.env else 0,
+            )
+            return True
+
+    except Exception as e:
+        log.error("DB write failed: %s", e, exc_info=True)
+        return False
 
 
-def json_to_reading(data: dict) -> SensorReading:
+# ══════════════════════════════════════════════════════════════
+#  РЕЖИМ 1: Serial
+# ══════════════════════════════════════════════════════════════
+async def run_serial(port: str, baud: int) -> None:
     """
-    Маппинг из согласованной JSON-схемы ESP32 → ORM-модель.
-    Безопасен к отсутствию любого поля (graceful degradation).
+    Читает строки из Serial порта ESP32.
+    Обрабатывает только строки с префиксом [JSON].
+    Автоматически переподключается при разрыве.
     """
-    env  = data.get("environmental", {})
-    struc = data.get("structural", {})
-    spat = data.get("spatial", {})
-    issues = data.get("issues", [])
+    try:
+        import serial_asyncio   # pip install pyserial-asyncio
+    except ImportError:
+        log.error("Install: pip install pyserial-asyncio")
+        sys.exit(1)
 
-    return SensorReading(
-        building_id  = data.get("building_id", "BILB_001"),
-        scan_id      = data.get("scan_id", 0),
-        received_at  = datetime.now(timezone.utc),
+    attempts = 0
+    while attempts < MAX_RECONNECT:
+        try:
+            log.info("Connecting to %s @ %d baud...", port, baud)
+            reader, _ = await serial_asyncio.open_serial_connection(
+                url=port, baudrate=baud
+            )
+            attempts = 0
+            log.info("Serial connected. Listening...")
 
-        temperature  = env.get("temperature_c"),
-        humidity     = env.get("humidity_pct"),
-        pressure     = env.get("pressure_hpa"),
-        light_lux    = env.get("light_lux"),
+            while True:
+                line = await asyncio.wait_for(
+                    reader.readline(), timeout=30.0
+                )
+                text = line.decode("utf-8", errors="replace")
+                await process_packet(text)
 
-        tilt_deg     = struc.get("tilt_deg"),
-        accel_x      = struc.get("accel_x"),
-        accel_y      = struc.get("accel_y"),
-        accel_z      = struc.get("accel_z"),
-        vibration    = int(struc.get("vibration", False)),
+        except asyncio.TimeoutError:
+            log.warning("Serial timeout — no data for 30s. Is ESP32 running?")
 
-        dist_front   = spat.get("front_cm"),
-        dist_back    = spat.get("back_cm"),
-        dist_left    = spat.get("left_cm"),
-        dist_right   = spat.get("right_cm"),
-        edge         = int(spat.get("edge", False)),
+        except Exception as e:
+            attempts += 1
+            log.error("Serial error (%d/%d): %s", attempts, MAX_RECONNECT, e)
+            await asyncio.sleep(RECONNECT_DELAY_S)
 
-        status       = data.get("status", "UNKNOWN"),
-        score        = data.get("score"),
-        issues       = json.dumps(issues),
+
+# ══════════════════════════════════════════════════════════════
+#  РЕЖИМ 2: WebSocket
+#  Подключается к ESP32 как клиент (ESP32 = сервер)
+# ══════════════════════════════════════════════════════════════
+async def run_websocket(url: str) -> None:
+    """
+    Подключается к WebSocket серверу ESP32 (ws://192.168.4.1:81).
+    Работает параллельно с control.html — оба могут быть подключены.
+    """
+    try:
+        import websockets
+    except ImportError:
+        log.error("Install: pip install websockets")
+        sys.exit(1)
+
+    attempts = 0
+    while attempts < MAX_RECONNECT:
+        try:
+            log.info("Connecting to WS %s ...", url)
+            async with websockets.connect(
+                url,
+                ping_interval=10,
+                ping_timeout=5,
+                open_timeout=10,
+            ) as ws:
+                attempts = 0
+                log.info("WebSocket connected to ESP32")
+
+                async for message in ws:
+                    if isinstance(message, bytes):
+                        message = message.decode("utf-8", errors="replace")
+                    await process_packet(message)
+
+        except Exception as e:
+            attempts += 1
+            log.error("WS error (%d/%d): %s", attempts, MAX_RECONNECT, e)
+            log.info("Reconnecting in %.0fs...", RECONNECT_DELAY_S)
+            await asyncio.sleep(RECONNECT_DELAY_S)
+
+
+# ══════════════════════════════════════════════════════════════
+#  РЕЖИМ 3: Demo  —  синтетические данные без ESP32
+# ══════════════════════════════════════════════════════════════
+class DemoGenerator:
+    """
+    Генерирует реалистичные данные:
+    · Постепенный дрейф влажности (синусоида + шум)
+    · Случайные события вибрации при высокой влажности
+    · Круговой маршрут по сетке (dead-reckoning)
+    """
+
+    def __init__(self, building_id: str = BUILDING_ID):
+        self.building_id = building_id
+        self.t           = 0.0    # «время» симуляции
+        self.scan_id     = 0
+        # Начальная позиция
+        self.x           = 5.0
+        self.y           = 5.0
+        self.heading     = 0.0
+
+    def next(self) -> dict:
+        self.t      += 0.1
+        self.scan_id += 1
+
+        # Влажность: дрейф + шум
+        humidity = 50.0 + 25.0 * math.sin(self.t / 20.0) + random.gauss(0, 2)
+        humidity = max(10.0, min(100.0, humidity))
+
+        temperature = 22.0 + 6.0 * math.sin(self.t / 15.0) + random.gauss(0, 0.5)
+        pressure    = 1013.2 + random.gauss(0, 1.5)
+        light       = max(0.0, 180.0 + 100.0 * math.sin(self.t / 10.0) + random.gauss(0, 10))
+
+        tilt_roll   = 1.5 * math.sin(self.t / 8.0) + random.gauss(0, 0.2)
+        tilt_pitch  = 1.0 * math.cos(self.t / 12.0) + random.gauss(0, 0.15)
+
+        vibration   = humidity > 65 and random.random() > 0.6
+
+        # Движение по кругу
+        self.heading  = (self.t * 12.0) % 360.0
+        rad = math.radians(self.heading - 90)
+        self.x = 10.0 + 4.0 * math.cos(self.t * 0.3)
+        self.y = 10.0 + 4.0 * math.sin(self.t * 0.3)
+
+        # Scoring — зеркало profile.ino::assessDegradation()
+        # порядок: накопить score → clamp → эскалировать статус
+        score  = 0.0
+        status = "OK"
+        issues = []
+
+        if humidity >= 70:
+            score += 40.0; issues.append("HIGH_HUMIDITY")
+        elif humidity >= 55:
+            score += 20.0; issues.append("ELEVATED_HUMIDITY")
+
+        if vibration:
+            score += 25.0; issues.append("VIBRATION_DETECTED")
+            if humidity >= 70:
+                score += 15.0; issues.append("STRUCTURAL_RISK_COMBO")
+
+        if temperature >= 40:
+            score += 20.0; issues.append("HIGH_TEMPERATURE")
+        elif temperature >= 30:
+            score += 8.0
+
+        if abs(tilt_roll) >= 15:
+            score += 35.0; issues.append("CRITICAL_STRUCTURAL_TILT")
+        elif abs(tilt_roll) >= 5:
+            score += 12.0; issues.append("TILT_DETECTED")
+
+        if 0 < light < 100:
+            score += 5.0; issues.append("POOR_DAYLIGHTING")
+
+        # Clamp FIRST (как в прошивке: constrain перед эскалацией)
+        score = min(score, 100.0)
+
+        # Escalate status
+        if score >= 65:   status = "CRITICAL"
+        elif score >= 30: status = "WARNING"
+        else:             status = "OK"
+
+        return {
+            "v":           "2.1.0-demo",
+            "building_id": self.building_id,
+            "scan_id":     self.scan_id,
+            "ts_ms":       int(time.time() * 1000),
+            "status":      status,
+            # ArduinoJson serialized(String(val,N)) → строки, зеркалим это
+            "score":       f"{score:.1f}",
+            "pos": {
+                "x":   f"{self.x:.2f}",
+                "y":   f"{self.y:.2f}",
+                "hdg": int(self.heading),
+            },
+            "env": {
+                "t":  f"{temperature:.2f}",
+                "h":  f"{humidity:.2f}",
+                "p":  f"{pressure:.1f}",
+                "lx": int(light),
+            },
+            "str": {
+                "roll":  f"{tilt_roll:.2f}",
+                "pitch": f"{tilt_pitch:.2f}",
+                "ax": f"{random.gauss(0.1,  0.05):.3f}",
+                "ay": f"{random.gauss(-0.05, 0.03):.3f}",
+                "az": f"{random.gauss(9.78,  0.02):.3f}",
+                "vib": vibration,
+            },
+            "dist": {
+                "f": round(random.uniform(20, 200), 1),
+                "b": round(random.uniform(30, 400), 1),
+                "l": round(random.uniform(15, 150), 1),
+                "r": round(random.uniform(20, 180), 1),
+            },
+            "issues": issues,
+        }
+
+
+async def run_demo(interval_s: float) -> None:
+    gen = DemoGenerator()
+    log.info(
+        "Demo mode: generating telemetry every %.1fs for building '%s'",
+        interval_s, BUILDING_ID,
+    )
+    while True:
+        packet = gen.next()
+        raw = "[JSON] " + json.dumps(packet)
+        ok = await process_packet(raw)
+        if ok:
+            # score, env, and pos values are serialized as strings (mirrors
+            # ArduinoJson serialized(String(val, N))) — cast to float before
+            # using float format specs to avoid TypeError.
+            print(
+                f"\r[DEMO] Scan#{packet['scan_id']:4d} | "
+                f"{packet['status']:<8} | "
+                f"Score={float(packet['score']):5.1f} | "
+                f"H={float(packet['env']['h']):5.1f}% | "
+                f"T={float(packet['env']['t']):5.1f}°C | "
+                f"X={float(packet['pos']['x']):.1f} Y={float(packet['pos']['y']):.1f}",
+                end="", flush=True,
+            )
+        await asyncio.sleep(interval_s)
+
+
+# ══════════════════════════════════════════════════════════════
+#  Entrypoint
+# ══════════════════════════════════════════════════════════════
+async def main(args: argparse.Namespace) -> None:
+    # Инициализация БД
+    await create_tables()
+
+    mode = args.mode or BRIDGE_MODE
+    log.info("Bridge starting in mode: %s", mode.upper())
+
+    if mode == "serial":
+        await run_serial(args.port or SERIAL_PORT, args.baud or SERIAL_BAUD)
+    elif mode == "websocket":
+        await run_websocket(args.url or WS_URL)
+    elif mode == "demo":
+        await run_demo(args.interval or DEMO_INTERVAL_S)
+    else:
+        log.error("Unknown mode: %s  (use: serial | websocket | demo)", mode)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(name)s] %(levelname)s  %(message)s",
+        datefmt="%H:%M:%S",
     )
 
-
-# ──────────────────────────────────────────────────────────────────
-#  Demo Data Generator (День 1: фронтенд не ждёт ESP32)
-# ──────────────────────────────────────────────────────────────────
-_demo_scan_counter = 0
-
-
-def generate_demo_reading() -> dict:
-    """
-    Генерирует реалистичные фиктивные данные для демо-режима.
-    Имитирует постепенное ухудшение состояния здания.
-    """
-    global _demo_scan_counter
-    _demo_scan_counter += 1
-    t = _demo_scan_counter
-
-    # Симулируем дрейф параметров со случайным шумом
-    humidity    = 45.0 + 30.0 * math.sin(t / 20.0) + random.gauss(0, 3)
-    temperature = 22.0 + 8.0  * math.sin(t / 15.0) + random.gauss(0, 1)
-    tilt        = 2.0  + 1.5  * math.sin(t / 30.0) + random.gauss(0, 0.3)
-    vibration   = humidity > 65 and random.random() > 0.4
-
-    # Авто-статус (имитирует алгоритм ESP32)
-    if humidity > 70 and vibration:
-        status, score = "CRITICAL", random.uniform(70, 95)
-    elif humidity > 55 or abs(tilt) > 5:
-        status, score = "WARNING", random.uniform(30, 60)
-    else:
-        status, score = "OK", random.uniform(0, 25)
-
-    issues = []
-    if humidity > 70:  issues.append("HIGH_HUMIDITY")
-    if vibration:      issues.append("VIBRATION_DETECTED")
-    if abs(tilt) > 5:  issues.append("TILT_DETECTED")
-
-    return {
-        "building_id": os.getenv("BUILDING_ID", "BILB_001"),
-        "scan_id": t,
-        "timestamp_ms": int(time.time() * 1000),
-        "status": status,
-        "score": round(score, 1),
-        "environmental": {
-            "temperature_c": round(temperature, 2),
-            "humidity_pct":  round(max(10, min(100, humidity)), 2),
-            "pressure_hpa":  round(1013.2 + random.gauss(0, 2), 1),
-            "light_lux":     round(max(0, 150 + 100 * math.sin(t / 10) + random.gauss(0, 15)), 1),
-        },
-        "structural": {
-            "tilt_deg":  round(tilt, 2),
-            "accel_x":   round(random.gauss(0.1, 0.05), 3),
-            "accel_y":   round(random.gauss(-0.05, 0.03), 3),
-            "accel_z":   round(random.gauss(9.78, 0.02), 3),
-            "vibration": vibration,
-        },
-        "spatial": {
-            "front_cm": round(random.uniform(20, 200), 1),
-            "back_cm":  round(random.uniform(30, 999), 1),
-            "left_cm":  round(random.uniform(15, 150), 1),
-            "right_cm": round(random.uniform(25, 180), 1),
-            "edge":     random.random() < 0.02,
-        },
-        "issues": issues,
-    }
-
-
-# ──────────────────────────────────────────────────────────────────
-#  Bridge Loop — Serial или Demo
-# ──────────────────────────────────────────────────────────────────
-_running = False
-
-
-def serial_loop(port: str, baud: int):
-    """Основной цикл чтения из Serial-порта ESP32."""
-    print(f"[BRIDGE] Connecting to {port} @ {baud}bps...")
-    try:
-        ser = serial.Serial(port, baud, timeout=2)
-        print(f"[BRIDGE] Connected. Listening...")
-        while _running:
-            try:
-                line = ser.readline().decode("utf-8", errors="replace")
-                data = parse_esp32_json(line)
-                if data:
-                    _save_reading(data)
-            except serial.SerialException as e:
-                print(f"[BRIDGE] Serial error: {e}. Retrying in 5s...")
-                time.sleep(5)
-    except serial.SerialException as e:
-        print(f"[BRIDGE] Cannot open port {port}: {e}")
-        print("[BRIDGE] Falling back to demo mode.")
-        demo_loop()
-
-
-def demo_loop():
-    """Демо-цикл: генерирует данные каждые 2 секунды."""
-    print("[BRIDGE] Demo mode active. Generating fake data every 2s...")
-    while _running:
-        data = generate_demo_reading()
-        _save_reading(data)
-        # Выводим в stdout как если бы это был ESP32
-        print(f"[JSON] {json.dumps(data)}")
-        time.sleep(2)
-
-
-def _save_reading(data: dict):
-    """Сохраняет распарсенные данные в БД."""
-    with SessionLocal() as session:
-        reading = json_to_reading(data)
-        session.add(reading)
-        session.commit()
-        status_icon = {"OK": "🟢", "WARNING": "🟡", "CRITICAL": "🔴"}.get(reading.status, "⚪")
-        print(f"[BRIDGE] Saved scan#{reading.scan_id} | "
-              f"{status_icon} {reading.status} | "
-              f"H:{reading.humidity:.1f}% T:{reading.temperature:.1f}°C")
-
-
-# ──────────────────────────────────────────────────────────────────
-#  Public API — используется из Streamlit
-# ──────────────────────────────────────────────────────────────────
-def get_latest_readings(building_id: str = "BILB_001",
-                        limit: int = 100) -> list[dict]:
-    """
-    Возвращает последние N записей для данного здания.
-    Используется в Streamlit для обновления графиков.
-    """
-    with SessionLocal() as session:
-        rows = (
-            session.query(SensorReading)
-            .filter(SensorReading.building_id == building_id)
-            .order_by(desc(SensorReading.received_at))
-            .limit(limit)
-            .all()
-        )
-        return [_reading_to_dict(r) for r in reversed(rows)]
-
-
-def get_latest_status(building_id: str = "BILB_001") -> dict:
-    """
-    Возвращает самую свежую запись (для Live-монитора).
-    СРАЗУ доступен фронтенду даже без обученного ML (День 1).
-    Возвращает status=UNKNOWN если данных ещё нет.
-    """
-    with SessionLocal() as session:
-        row = (
-            session.query(SensorReading)
-            .filter(SensorReading.building_id == building_id)
-            .order_by(desc(SensorReading.received_at))
-            .first()
-        )
-        if row is None:
-            return {
-                "status": "UNKNOWN", "score": 0,
-                "temperature": None, "humidity": None,
-                "vibration": False, "tilt_deg": None,
-                "issues": [],
-            }
-        return _reading_to_dict(row)
-
-
-def _reading_to_dict(r: SensorReading) -> dict:
-    return {
-        "id":          r.id,
-        "building_id": r.building_id,
-        "scan_id":     r.scan_id,
-        "received_at": r.received_at.isoformat() if r.received_at else None,
-        "temperature": r.temperature,
-        "humidity":    r.humidity,
-        "pressure":    r.pressure,
-        "light_lux":   r.light_lux,
-        "tilt_deg":    r.tilt_deg,
-        "accel_x":     r.accel_x,
-        "accel_y":     r.accel_y,
-        "accel_z":     r.accel_z,
-        "vibration":   bool(r.vibration),
-        "dist_front":  r.dist_front,
-        "dist_back":   r.dist_back,
-        "dist_left":   r.dist_left,
-        "dist_right":  r.dist_right,
-        "edge":        bool(r.edge),
-        "status":      r.status,
-        "score":       r.score,
-        "issues":      json.loads(r.issues) if r.issues else [],
-    }
-
-
-# ──────────────────────────────────────────────────────────────────
-#  CLI Entry Point
-# ──────────────────────────────────────────────────────────────────
-if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="BILB Data Bridge")
-    parser.add_argument("--port",  default=os.getenv("SERIAL_PORT", "/dev/ttyUSB0"))
-    parser.add_argument("--baud",  default=int(os.getenv("SERIAL_BAUD", 115200)), type=int)
-    parser.add_argument("--demo",  action="store_true",
-                        help="Run in demo mode (no ESP32 required)")
+    parser.add_argument("--mode",     choices=["serial", "websocket", "demo"],
+                        help="Bridge mode (overrides BRIDGE_MODE env)")
+    parser.add_argument("--port",     help="Serial port, e.g. /dev/ttyUSB0 or COM3")
+    parser.add_argument("--baud",     type=int, help="Serial baud rate (default 115200)")
+    parser.add_argument("--url",      help="WebSocket URL (default ws://192.168.4.1:81)")
+    parser.add_argument("--interval", type=float, help="Demo interval seconds (default 2.0)")
     args = parser.parse_args()
 
-    _running = True
-    print("=" * 55)
-    print("  BILB Data Bridge — Starting...")
-    print("=" * 55)
+    print("=" * 56)
+    print("  BILB Data Bridge  v2.1.0")
+    print("=" * 56)
 
-    if args.demo or os.getenv("USE_DEMO_DATA", "True").lower() == "true":
-        demo_loop()
-    else:
-        serial_loop(args.port, args.baud)
+    try:
+        asyncio.run(main(args))
+    except KeyboardInterrupt:
+        print("\n[BRIDGE] Stopped by user")

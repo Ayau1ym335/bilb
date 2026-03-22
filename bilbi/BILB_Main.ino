@@ -12,8 +12,6 @@ SensorData      g_sensor     = {};
 BuildingProfile g_profile    = {};
 RobotPose       g_pose       = {};
 RobotState      g_state      = RobotState::IDLE;
-volatile bool   g_vibrationFlag = false;   
-uint32_t        g_scanCounter   = 0;
 
 static Adafruit_SSD1306 s_oled(OLED_W, OLED_H, &Wire, OLED_RESET);
 static bool             s_oledOk = false;
@@ -38,10 +36,6 @@ void wsSendState(uint8_t, RobotState); int wsActiveClient();
 void initHTTPClient(); void httpPostTelemetry(const char*, size_t);
 void getHTTPStats(bool&, uint32_t&, uint32_t&); size_t getBufferBytes();
 
-// ════════════════════════════════════════════════════════════════
-//  setRobotState()  —  Публичная функция смены состояния
-//  Вызывается из WebSocket_Server.ino и внутренних переходов
-// ════════════════════════════════════════════════════════════════
 void setRobotState(RobotState ns) {
   static const char* names[] = {
     "IDLE","SCANNING","MANUAL","WAYPOINT","EMERGENCY"
@@ -116,8 +110,6 @@ void setup() {
   digitalWrite(PIN_RGB_R, HIGH); digitalWrite(PIN_RGB_G, HIGH);
   digitalWrite(PIN_RGB_B, HIGH);
 
-  // ── ADC ──────────────────────────────────────────────────────
-  // ▶ НАСТРОЙТЕ: атенюация для SW-420 (VIBRATION) пина
   analogSetAttenuation(ADC_11db);   // 0–3.3V диапазон
 
   // ── I2C ──────────────────────────────────────────────────────

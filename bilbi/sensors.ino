@@ -14,21 +14,19 @@ static bool s_bhOk  = false;
 
 template<typename T, uint8_t N>
 class MovAvg {
-  T buf[N] = {};
-  uint8_t idx = 0;
-  uint8_t cnt = 0;
+  T       buf[N] = {};
+  float   sum    = 0.0f;   // running sum → O(1) get()
+  uint8_t idx    = 0;
+  uint8_t cnt    = 0;
 public:
   void push(T v) {
+    sum -= buf[idx];
     buf[idx] = v;
+    sum += v;
     idx = (idx + 1) % N;
     if (cnt < N) cnt++;
   }
-  T get() const {
-    if (cnt == 0) return T(0);
-    float s = 0;
-    for (uint8_t i = 0; i < cnt; i++) s += buf[i];
-    return T(s / cnt);
-  }
+  T    get()   const { return cnt ? T(sum / cnt) : T(0); }
   bool ready() const { return cnt == N; }
 };
 
@@ -86,6 +84,10 @@ void initSensors() {
   pinMode(PIN_US_B_TRIG, OUTPUT); digitalWrite(PIN_US_B_TRIG, LOW);
   pinMode(PIN_US_L_TRIG, OUTPUT); digitalWrite(PIN_US_L_TRIG, LOW);
   pinMode(PIN_US_R_TRIG, OUTPUT); digitalWrite(PIN_US_R_TRIG, LOW);
+  pinMode(PIN_US_F_ECHO, INPUT);
+  pinMode(PIN_US_B_ECHO, INPUT);
+  pinMode(PIN_US_L_ECHO, INPUT);
+  pinMode(PIN_US_R_ECHO, INPUT);
   
   pinMode(PIN_VIBRATION, INPUT);
   attachInterrupt(digitalPinToInterrupt(PIN_VIBRATION), vibISR, RISING);
@@ -94,12 +96,6 @@ void initSensors() {
   Serial.println(F("[SENS] Init complete."));
 }
 
-// ════════════════════════════════════════════════════════════════
-//  pingUS()  —  Один измерительный импульс HC-SR04
-//  Возвращает: расстояние cm | DIST_MAX_CM если нет эха
-//
-//  ▶ НАСТРОЙТЕ DIST_ECHO_TIMEOUT_US если нужно иное макс. расстояние
-// ════════════════════════════════════════════════════════════════
 static float pingUS(uint8_t trigPin, uint8_t echoPin) {
   digitalWrite(trigPin, LOW);
   delayMicroseconds(4);
@@ -129,21 +125,13 @@ static float pingUS(uint8_t trigPin, uint8_t echoPin) {
   return cm;
 }
 
-// ════════════════════════════════════════════════════════════════
-//  calcTilt()  —  Угол крена и тангажа из акселерометра (°)
-//  Метод: complementary filter (простой, без гироскопной интеграции)
-//  Если нужен Kalman — замени эту функцию.
-// ════════════════════════════════════════════════════════════════
 static void calcTilt(float ax, float ay, float az,
                      float& rollDeg, float& pitchDeg) {
   // Roll  (крен  вокруг оси X)
   rollDeg  = atan2f(ay, sqrtf(ax*ax + az*az)) * (180.0f / PI);
   // Pitch (тангаж вокруг оси Y)
   pitchDeg = atan2f(-ax, sqrtf(ay*ay + az*az)) * (180.0f / PI);
-  //
-  // ▶ НАСТРОЙТЕ: если MPU6050 смонтирован под углом — добавь смещение:
-  //   rollDeg  -= MOUNT_ROLL_OFFSET_DEG;
-  //   pitchDeg -= MOUNT_PITCH_OFFSET_DEG;
+                       
 }
 
 void readAllSensors() {
@@ -152,9 +140,13 @@ void readAllSensors() {
   s_lastReadMs = now;
 
   if (s_bmeOk) {
-    mf_temp.push(s_bme.readTemperature());
-    mf_hum.push(s_bme.readHumidity());
-    mf_press.push(s_bme.readPressure() / 100.0f);
+    float t = s_bme.readTemperature();
+    float h = s_bme.readHumidity();
+    float p = s_bme.readPressure() / 100.0f;
+    // Plausibility guard: reject out-of-spec reads (I2C glitch mid-session)
+    if (t > -40.0f && t < 85.0f)   mf_temp.push(t);
+    if (h >= 0.0f  && h <= 100.0f) mf_hum.push(h);
+    if (p > 870.0f && p < 1085.0f) mf_press.push(p);
 
     g_sensor.temperature = mf_temp.get();
     g_sensor.humidity    = mf_hum.get();
@@ -170,7 +162,8 @@ void readAllSensors() {
   }
 
   if (s_mpuOk) {
-    sensors_event_t eA, eG, eT;
+    sensors_event_t eA, eG, eT;   // eT unused but required by getEvent() API
+    (void)eT;                      // suppress compiler warning
     s_mpu.getEvent(&eA, &eG, &eT);
 
     g_sensor.accelX = eA.acceleration.x;
@@ -188,13 +181,16 @@ void readAllSensors() {
     g_sensor.tiltPitch = mf_tiltP.get();
   }
 
+  // Always poll front sensor every cycle for safety — obstacle avoidance depends on it.
+  // Rotate back/left/right through the remaining slot so each is updated every 3 cycles.
   mf_dF.push(pingUS(PIN_US_F_TRIG, PIN_US_F_ECHO));
-  delayMicroseconds(10000);
-  mf_dB.push(pingUS(PIN_US_B_TRIG, PIN_US_B_ECHO));
-  delayMicroseconds(10000);
-  mf_dL.push(pingUS(PIN_US_L_TRIG, PIN_US_L_ECHO));
-  delayMicroseconds(10000);
-  mf_dR.push(pingUS(PIN_US_R_TRIG, PIN_US_R_ECHO));
+
+  static uint8_t s_usPhase = 0;
+  switch (s_usPhase++ % 3) {
+    case 0: mf_dB.push(pingUS(PIN_US_B_TRIG, PIN_US_B_ECHO)); break;
+    case 1: mf_dL.push(pingUS(PIN_US_L_TRIG, PIN_US_L_ECHO)); break;
+    case 2: mf_dR.push(pingUS(PIN_US_R_TRIG, PIN_US_R_ECHO)); break;
+  }
 
   g_sensor.distFront = mf_dF.get();
   g_sensor.distBack  = mf_dB.get();

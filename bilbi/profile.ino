@@ -1,6 +1,8 @@
 #include <ArduinoJson.h>
 #include "Config.h"
 
+static char s_lastJsonBuf[600] = {};
+
 unsigned long g_profileLastMs = 0;
 uint32_t      g_scanCounter   = 0;
 
@@ -64,10 +66,9 @@ void assessDegradation() {
     issueAdd("POOR_DAYLIGHTING");
   }
 
+  score = constrain(score, 0.0f, 100.0f);   // clamp FIRST
   if (status == DegStatus::OK      && score >= 30.0f) status = DegStatus::WARNING;
   if (status == DegStatus::WARNING && score >= 65.0f) status = DegStatus::CRITICAL;
-
-  score = constrain(score, 0.0f, 100.0f);
 
   g_profile.status = status;
   g_profile.score  = score;
@@ -115,13 +116,13 @@ size_t serializeToJson(char* buf, size_t bufLen) {
   env["lx"] = (int)g_sensor.lightLux;
 
   // Структурные
-  JsonObject str = doc.createNestedObject("str");
-  str["roll"]  = serialized(String(g_sensor.tiltRoll,  2));
-  str["pitch"] = serialized(String(g_sensor.tiltPitch, 2));
-  str["ax"]    = serialized(String(g_sensor.accelX,    3));
-  str["ay"]    = serialized(String(g_sensor.accelY,    3));
-  str["az"]    = serialized(String(g_sensor.accelZ,    3));
-  str["vib"]   = g_sensor.vibration;
+  JsonObject stru = doc.createNestedObject("str");
+  stru["roll"]  = serialized(String(g_sensor.tiltRoll,  2));
+  stru["pitch"] = serialized(String(g_sensor.tiltPitch, 2));
+  stru["ax"]    = serialized(String(g_sensor.accelX,    3));
+  stru["ay"]    = serialized(String(g_sensor.accelY,    3));
+  stru["az"]    = serialized(String(g_sensor.accelZ,    3));
+  stru["vib"]   = g_sensor.vibration;
 
   // Дистанции
   JsonObject dist = doc.createNestedObject("dist");
@@ -145,24 +146,22 @@ void generateProfile() {
   if (now - g_profileLastMs < IVMS_PROFILE) return;
   g_profileLastMs = now;
 
-  g_scanCounter++;
+  if (g_state == RobotState::SCANNING) g_scanCounter++;
   assessDegradation();
-  static char jsonBuf[600];
-  size_t len = serializeToJson(jsonBuf, sizeof(jsonBuf));
+  // Write directly into the shared buffer so getLastJsonBuffer() is always fresh
+  size_t len = serializeToJson(s_lastJsonBuf, sizeof(s_lastJsonBuf));
   if (len == 0) {
     Serial.println(F("[PROF] JSON overflow — увеличь bufLen"));
     return;
   }
   Serial.print(F("[JSON] "));
-  Serial.println(jsonBuf);
-  httpPostTelemetry(jsonBuf, len);
+  Serial.println(s_lastJsonBuf);
+  httpPostTelemetry(s_lastJsonBuf, len);
 }
-
-static char s_lastJsonBuf[600] = {};
 
 const char* getLastJsonBuffer() { return s_lastJsonBuf; }
 
 void assessAndCache() {
-  assessDegradation();
+  assessDegradation();   // ensure fresh data even if called before generateProfile()
   serializeToJson(s_lastJsonBuf, sizeof(s_lastJsonBuf));
 }

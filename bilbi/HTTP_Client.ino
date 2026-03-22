@@ -1,14 +1,3 @@
-// ════════════════════════════════════════════════════════════════
-//  HTTP_Client.ino  —  Telemetry Uplink + Offline Buffer
-//
-//  Логика:
-//    1. Попытка HTTP POST на FastAPI бэкенд
-//    2. При неудаче — запись в SPIFFS (файловая система ESP32)
-//    3. При восстановлении связи — flush буфера
-//
-//  ▶ НАСТРОЙТЕ: HTTP_BACKEND_URL, SPIFFS_MAX_BYTES в Config.h
-// ════════════════════════════════════════════════════════════════
-
 #include <HTTPClient.h>
 #include <SPIFFS.h>
 #include "Config.h"
@@ -19,7 +8,7 @@ static uint32_t s_failCount     = 0;
 static uint32_t s_successCount  = 0;
 
 // ════════════════════════════════════════════════════════════════
-//  initHTTPClient()  —  Вызывать в setup() после WiFi
+//  initHTTPClient()  —  Вызывать в setup() (before WiFi OK for SPIFFS init)
 // ════════════════════════════════════════════════════════════════
 void initHTTPClient() {
   s_spiffsOk = SPIFFS.begin(true);   // true = форматировать если пуст
@@ -81,12 +70,15 @@ static void flushBuffer() {
   if (!f) return;
 
   uint32_t sent = 0, failed = 0;
-  static char lineBuf[600];
+  static char lineBuf[768];       // match max JSON output size
 
   while (f.available()) {
     size_t ln = f.readBytesUntil('\n', lineBuf, sizeof(lineBuf)-1);
     if (ln == 0) continue;
     lineBuf[ln] = '\0';
+
+    // Skip malformed lines (truncated reads)
+    if (lineBuf[0] != '{') continue;
 
     int code = httpPost(HTTP_BACKEND_URL, lineBuf, ln);
     if (code == 200 || code == 201) {
@@ -114,9 +106,6 @@ static void flushBuffer() {
 void httpPostTelemetry(const char* json, size_t len) {
   // Нет Wi-Fi клиентов вообще — не пытаемся
   if (WiFi.softAPgetStationNum() == 0) {
-    // В AP-режиме нет смысла делать HTTP к внешнему серверу
-    // если к нам никто не подключён (нет роутера)
-    // ▶ НАСТРОЙТЕ: если у вас гибридный режим AP+STA — убрать эту проверку
     writeToBuffer(json, len);
     return;
   }

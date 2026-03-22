@@ -101,9 +101,9 @@ void updatePose() {
 
     default: break;
   }
-''
-  while (g_pose.headingDeg <    0.0f) g_pose.headingDeg += 360.0f;
-  while (g_pose.headingDeg >= 360.0f) g_pose.headingDeg -= 360.0f;
+
+  // Normalise heading to [0, 360)
+  g_pose.headingDeg = fmodf(g_pose.headingDeg + 3600.0f, 360.0f);
 
   // Границы сетки
   g_pose.x = constrain(g_pose.x, 0.0f, (float)(GRID_COLS - 1));
@@ -114,6 +114,10 @@ void reactiveAvoid() {
   unsigned long now = millis();
   if (now - s_navLastMs < IVMS_NAV) return;
   s_navLastMs = now;
+
+  // Non-blocking pause after front-stop: let other subsystems run during the wait
+  static unsigned long s_avoidPauseUntil = 0;
+  if (now < s_avoidPauseUntil) return;
 
   float f = g_sensor.distFront;
   float b = g_sensor.distBack;
@@ -126,12 +130,24 @@ void reactiveAvoid() {
   }
 
   if (f < DIST_OBSTACLE_CM) {
-    motorStop();
-    delayMicroseconds(50000); 
+    if (s_motionState == MotionState::TURN_LEFT || s_motionState == MotionState::TURN_RIGHT) {
+      // Already turning to avoid, continue turning
+      return;
+    }
+
+    if (s_avoidPauseUntil == 0) {
+      // First detection: stop and set a short pause
+      motorStop();
+      s_avoidPauseUntil = now + 50;   // 50 ms non-blocking pause
+      return;
+    }
+    // Pause expired, obstacle still present: choose turn direction
+    s_avoidPauseUntil = 0;
     (l > r) ? motorTurnLeft(MOTOR_SPEED_TURN)
-             : motorTurnRight(MOTOR_SPEED_TURN);
+            : motorTurnRight(MOTOR_SPEED_TURN);
     return;
   }
+  s_avoidPauseUntil = 0;
 
   if (b < DIST_OBSTACLE_CM && s_motionState == MotionState::BACKWARD) {
     motorStop(); return;
@@ -159,8 +175,8 @@ bool isEmergency() {
     Serial.println(F("[NAV] EMRG: critical pitch"));
     return true;
   }
-  if (g_sensor.distFront < 8.0f && g_sensor.distBack < 8.0f) {
-    Serial.println(F("[NAV] EMRG: trapped <8cm"));
+  if (g_sensor.distFront < DIST_TRAPPED_CM && g_sensor.distBack < DIST_TRAPPED_CM) {
+    Serial.println(F("[NAV] EMRG: trapped"));
     return true;
   }
   return false;
@@ -239,8 +255,9 @@ void wpTick() {
   float hdgErr = wrapAngle(targetHdg - g_pose.headingDeg);
 
   if (fabsf(hdgErr) > WP_HEADING_TOL_DEG) {
-    uint8_t tSpd = map((int)fabsf(hdgErr), (int)WP_HEADING_TOL_DEG, 90,
-                        MOTOR_SPEED_SLOW, MOTOR_SPEED_TURN);
+    float fErr = fabsf(hdgErr);
+    float t = constrain((fErr - WP_HEADING_TOL_DEG) / (90.0f - WP_HEADING_TOL_DEG), 0.0f, 1.0f);
+    uint8_t tSpd = (uint8_t)(MOTOR_SPEED_SLOW + t * (MOTOR_SPEED_TURN - MOTOR_SPEED_SLOW));
     tSpd = constrain(tSpd, MOTOR_SPEED_SLOW, MOTOR_SPEED_TURN);
     (hdgErr > 0) ? motorTurnRight(tSpd) : motorTurnLeft(tSpd);
   } else {

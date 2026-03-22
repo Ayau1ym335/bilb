@@ -1,11 +1,14 @@
 #include <WiFi.h>
 #include <WebSocketsServer.h>
 #include <ArduinoJson.h>
-#include "Config.h"
+#include "config.h"
 
 static WebSocketsServer s_ws(WS_PORT);
 static int              s_activeClient = -1;
 static unsigned long    s_telemLastMs  = 0;
+
+// Forward declarations
+void onWsEvent(uint8_t cId, WStype_t type, uint8_t* payload, size_t len);
 
 extern void motorForward(uint8_t);
 extern void motorBackward(uint8_t);
@@ -181,7 +184,6 @@ void dispatchCommand(uint8_t cId, const char* json, size_t len) {
 
   // ── Сброс позиции ────────────────────────────────────────────
   if (!strcmp(cmd,"RESET_POSE")) {
-    // ▶ НАСТРОЙТЕ: стартовая позиция по умолчанию
     g_pose.x          = doc["x"]   | (float)(GRID_COLS/2);
     g_pose.y          = doc["y"]   | (float)(GRID_ROWS/2);
     g_pose.headingDeg = doc["hdg"] | 0.0f;
@@ -202,25 +204,50 @@ void dispatchCommand(uint8_t cId, const char* json, size_t len) {
 //  pushTelemetry()  —  Broadcast текущего состояния всем клиентам
 // ════════════════════════════════════════════════════════════════
 void pushTelemetry() {
-  assessAndCache();
+  // Build complete telemetry JSON in one pass — no double parse/serialize.
+  assessDegradation();
 
-  // Добавляем поле "type" и "state" к уже сериализованному буферу
-  // Разбираем, добавляем, пересериализуем
-  StaticJsonDocument<640> doc;
-  const char* base = getLastJsonBuffer();
-  if (deserializeJson(doc, base) != DeserializationError::Ok) return;
+  StaticJsonDocument<768> doc;
 
-  doc["type"]  = "telem";
+  doc["type"]        = "telem";
+  doc["v"]           = FW_VERSION;
+  doc["building_id"] = BUILDING_ID;
+  doc["scan_id"]     = g_sensor.scanId;
+  doc["ts_ms"]       = g_sensor.timestampMs;
+  doc["status"]      = g_profile.statusStr;
+  doc["score"]       = serialized(String(g_profile.score, 1));
 
   static const char* stateNames[] = {"IDLE","SCANNING","MANUAL","WAYPOINT","EMERGENCY"};
   uint8_t si = (uint8_t)g_state;
   doc["state"] = (si < 5) ? stateNames[si] : "UNKNOWN";
 
+  JsonObject pos = doc.createNestedObject("pos");
+  pos["x"]   = serialized(String(g_pose.x, 2));
+  pos["y"]   = serialized(String(g_pose.y, 2));
+  pos["hdg"] = (int)g_pose.headingDeg;
+
+  JsonObject env = doc.createNestedObject("env");
+  env["t"]  = serialized(String(g_sensor.temperature, 2));
+  env["h"]  = serialized(String(g_sensor.humidity,    2));
+  env["p"]  = serialized(String(g_sensor.pressure,    1));
+  env["lx"] = (int)g_sensor.lightLux;
+
+  JsonObject stru = doc.createNestedObject("str");
+  stru["roll"]  = serialized(String(g_sensor.tiltRoll,  2));
+  stru["pitch"] = serialized(String(g_sensor.tiltPitch, 2));
+  stru["vib"]   = g_sensor.vibration;
+
+  JsonObject dist = doc.createNestedObject("dist");
+  dist["f"] = (int)g_sensor.distFront;
+  dist["b"] = (int)g_sensor.distBack;
+  dist["l"] = (int)g_sensor.distLeft;
+  dist["r"] = (int)g_sensor.distRight;
+
   doc["wp_idx"]   = wpCurrentIdx();
   doc["wp_total"] = wpCount();
   doc["wp_run"]   = wpIsRunning();
 
-  static char outBuf[640];
+  static char outBuf[768];
   size_t outLen = serializeJson(doc, outBuf, sizeof(outBuf));
   if (outLen > 0) s_ws.broadcastTXT(outBuf, outLen);
 }

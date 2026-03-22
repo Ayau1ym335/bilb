@@ -2,7 +2,7 @@
 #include <Arduino.h>
 
 #define FW_VERSION      "2.1.0"
-#define BUILDING_ID     "BILB_001"    // ▶ НАСТРОЙТЕ: уникальный ID объекта
+#define BUILDING_ID     "BILB_001"    
 
 #define PIN_SDA   21
 #define PIN_SCL   22
@@ -23,7 +23,7 @@
 #define PIN_US_L_TRIG    5        
 #define PIN_US_L_ECHO   18        
 #define PIN_US_R_TRIG   19    
-#define PIN_US_R_ECHO   36         
+#define PIN_US_R_ECHO   16         
 
 #define PIN_VIBRATION   23          
 
@@ -35,17 +35,13 @@
 // ── PWM Channels (ESP32 LEDC) ─────────────────────────────────
 #define LEDC_L_CH        0           // Left motor  PWM channel
 #define LEDC_R_CH        1           // Right motor PWM channel
-#define LEDC_BUZ_CH      2           // Buzzer PWM channel
 #define LEDC_FREQ     1000           // Hz
 #define LEDC_RES         8           // bits  (0–255)
 
-// ════════════════════════════════════════════════════════════════
-//  II. I2C АДРЕСА УСТРОЙСТВ
-// ════════════════════════════════════════════════════════════════
-#define ADDR_OLED     0x3C           // SSD1306 128×64
-#define ADDR_BME280   0x76           // ▶ НАСТРОЙТЕ: 0x76 или 0x77 (зависит от SDO)
-#define ADDR_MPU6050  0x68           // ▶ НАСТРОЙТЕ: 0x68 или 0x69 (зависит от AD0)
-#define ADDR_BH1750   0x23           // ADDR pin → GND=0x23, VCC=0x5C
+#define ADDR_OLED     0x3C         
+#define ADDR_BME280   0x76       
+#define ADDR_MPU6050  0x68      
+#define ADDR_BH1750   0x23         
 
 #define OLED_W  128
 #define OLED_H   64
@@ -69,7 +65,7 @@
 
 // SPIFFS буфер при потере связи
 #define SPIFFS_BUFFER_FILE  "/telemetry_buffer.jsonl"
-#define SPIFFS_MAX_BYTES    (100 * 1024)   // 100 KB  ▶ НАСТРОЙТЕ под размер SPIFFS
+#define SPIFFS_MAX_BYTES    (100 * 1024)   // 100 KB  
 
 #define ROBOT_TRACK_MM      150.0f   // расстояние между левым и правым бортом, мм
 #define ROBOT_WHEEL_DIAM_MM  65.0f
@@ -83,18 +79,18 @@
 #define GRID_CELL_MM     300.0f     
 
 #define CELLS_PER_S  (ROBOT_SPEED_MM_S / GRID_CELL_MM)
-#define CELLS_PER_DEG (ROBOT_TURN_RATE_DEG_S / GRID_CELL_MM)
+// CELLS_PER_DEG removed: (ROBOT_TURN_RATE_DEG_S / GRID_CELL_MM) has wrong units (°/s ÷ mm)
 
-//  ▶ НАСТРОЙТЕ: подберите под моторы (слишком низкое = не трогается)
 #define MOTOR_SPEED_FULL    230      // нормальное движение
 #define MOTOR_SPEED_TURN    200      // поворот на месте
 #define MOTOR_SPEED_SLOW    150      // подъезд к точке вплотную
-#define MOTOR_DEAD_ZONE      80      // минимальный PWM, при котором мотор вращается
+#define MOTOR_DEAD_ZONE      80    
 
 #define DIST_OBSTACLE_CM    25.0f   
 #define DIST_CAUTION_CM     50.0f    
 #define DIST_MAX_CM        400.0f    
 #define DIST_ECHO_TIMEOUT_US 25000  
+#define DIST_TRAPPED_CM      8.0f    // cm — emergency: robot is trapped
 
 #define THR_HUMIDITY_CRIT   70.0f    // % — критическая влажность
 #define THR_HUMIDITY_WARN   55.0f    // %
@@ -144,7 +140,7 @@ enum class DegStatus : uint8_t { OK = 0, WARNING = 1, CRITICAL = 2 };
 
 struct BuildingProfile {
   DegStatus status;
-  char      statusStr[12]; 
+  char      statusStr[16]; 
   float     score;       
   char      issues[256];   
 };
