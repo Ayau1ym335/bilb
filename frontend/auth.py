@@ -116,13 +116,11 @@ def has_perm(perm: str) -> bool:
 # ──────────────────────────────────────────────────────────────
 #  CSS injected once
 # ──────────────────────────────────────────────────────────────
-_CSS_INJECTED = False
-
 def _inject_global_css():
-    global _CSS_INJECTED
-    if _CSS_INJECTED:
+    if st.session_state.get("_css_injected"):
         return
-    _CSS_INJECTED = True
+    st.session_state["_css_injected"] = True
+    st.markdown("""...""", unsafe_allow_html=True)
     st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;600;700&family=Barlow+Condensed:wght@400;600;700;800&display=swap');
