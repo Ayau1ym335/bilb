@@ -353,6 +353,142 @@ async def generate_building_scenarios(
 
 
 # ══════════════════════════════════════════════════════════════
+#  POST /api/buildings/{building_id}/sustainability
+#  Runs Движок 3 (Economist) and persists result to DB
+# ══════════════════════════════════════════════════════════════
+@app.post(
+    "/api/buildings/{building_id}/sustainability",
+    summary="Calculate sustainability & financial model (Engine 3)",
+)
+async def calculate_sustainability(
+    building_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Запускает математическую модель Economist для здания.
+    Результат сохраняется в BuildingProfile.sustainability_json.
+    """
+    from economist import calculate_from_profile
+
+    profile = await get_building_profile(db, building_id)
+    if profile is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Building '{building_id}' not found",
+        )
+
+    report = calculate_from_profile({
+        "building_id": profile.building_id,
+        "area_m2":     profile.area_m2,
+        "floors":      profile.floors,
+    })
+
+    await upsert_building_profile(
+        db,
+        building_id,
+        sustainability_json=json.dumps(report.to_dict()),
+    )
+
+    return {"building_id": building_id, "summary": report.summary}
+
+
+# ══════════════════════════════════════════════════════════════
+#  GET /api/buildings/{building_id}/report
+#  Assembles all engines → generates PDF → returns as download
+# ══════════════════════════════════════════════════════════════
+@app.get(
+    "/api/buildings/{building_id}/report",
+    summary="Generate full PDF assessment report",
+    response_class=None,  # returns raw bytes
+)
+async def get_pdf_report(
+    building_id: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Собирает данные всех трёх движков и генерирует PDF-отчёт.
+    Требует предварительного вызова /scenarios и /sustainability.
+    Возвращает application/pdf для прямого скачивания.
+    """
+    from fastapi.responses import Response
+    from report import generate_pdf
+    from ml import get_status
+    from economist import calculate_from_profile
+
+    profile = await get_building_profile(db, building_id)
+    if profile is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Building '{building_id}' not found",
+        )
+
+    # building dict for generator
+    building_data = {
+        "building_id": profile.building_id,
+        "name":        profile.name,
+        "city":        profile.city,
+        "year_built":  profile.year_built,
+        "area_m2":     profile.area_m2,
+        "floors":      profile.floors,
+        "address":     profile.address,
+    }
+
+    # sensor_data assembled from profile aggregates
+    sensor_data = {
+        "avg_temperature":  profile.avg_temperature,
+        "avg_humidity":     profile.avg_humidity,
+        "avg_light_lux":    profile.avg_light_lux,
+        "max_tilt_roll":    profile.max_tilt_roll,
+        "max_tilt_pitch":   profile.max_tilt_pitch,
+        "vibration_events": profile.vibration_events,
+        "total_readings":   profile.total_readings,
+        "total_scans":      profile.total_scans,
+        "issues":           profile.issues,
+    }
+
+    # ML result from profile fields
+    ml_result = {
+        "status":     profile.overall_status or "UNKNOWN",
+        "score":      profile.degradation_score or 0.0,
+        "confidence": 0.0,
+        "model":      "random_forest",
+        "rule_status": profile.overall_status or "UNKNOWN",
+    }
+
+    # Scenarios — from cached sustainability_json or fallback
+    scenarios: list[dict] = []
+    if profile.scenarios_json:
+        try:
+            scenarios = json.loads(profile.scenarios_json)
+        except Exception:
+            pass
+
+    # Sustainability report — recompute if not cached
+    if profile.sustainability_json:
+        try:
+            sus_report = json.loads(profile.sustainability_json)
+        except Exception:
+            sus_report = calculate_from_profile(building_data).to_dict()
+    else:
+        sus_report = calculate_from_profile(building_data).to_dict()
+
+    pdf_bytes = generate_pdf(
+        building    = building_data,
+        sensor_data = sensor_data,
+        ml_result   = ml_result,
+        scenarios   = scenarios,
+        sus_report  = sus_report,
+    )
+
+    filename = f"BILB_{building_id}_{json.dumps({}).encode()[:8].hex()}.pdf"
+    return Response(
+        content     = pdf_bytes,
+        media_type  = "application/pdf",
+        headers     = {"Content-Disposition": f'attachment; filename="BILB_{building_id}.pdf"'},
+    )
+
+
+# ══════════════════════════════════════════════════════════════
 #  GET /api/buildings/{building_id}/sessions
 # ══════════════════════════════════════════════════════════════
 @app.get(
