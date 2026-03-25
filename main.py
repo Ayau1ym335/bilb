@@ -22,7 +22,7 @@ logging.basicConfig(
 
 from ingestion.api import app   # noqa: E402 (импорт после logging setup)
 
-HOST = os.getenv("API_HOST", "0.0.0.0")   # ▶ НАСТРОЙТЕ
+HOST = os.getenv("API_HOST", "127.0.0.1")   # ▶ НАСТРОЙТЕ
 PORT = int(os.getenv("API_PORT", "8000")) # ▶ НАСТРОЙТЕ
 
 if __name__ == "__main__":
@@ -33,3 +33,4 @@ if __name__ == "__main__":
         reload=os.getenv("DEBUG", "false").lower() == "true",
         log_level="debug" if os.getenv("DEBUG") else "info",
     )
+ 

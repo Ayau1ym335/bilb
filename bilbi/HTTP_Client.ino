@@ -104,8 +104,8 @@ static void flushBuffer() {
 //  Вызывается из Profile.ino::generateProfile()
 // ════════════════════════════════════════════════════════════════
 void httpPostTelemetry(const char* json, size_t len) {
-  // Нет Wi-Fi клиентов вообще — не пытаемся
-  if (WiFi.softAPgetStationNum() == 0) {
+  // Нет Wi-Fi соединения вообще — не пытаемся
+  if (WiFi.status() != WL_CONNECTED) {
     writeToBuffer(json, len);
     return;
   }

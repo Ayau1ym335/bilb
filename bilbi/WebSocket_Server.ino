@@ -28,30 +28,19 @@ extern void setRobotState(RobotState s);
 void initWiFiAP() {
   WiFi.disconnect(true);
   delay(100);
-  WiFi.mode(WIFI_AP);
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
 
-  IPAddress ip, gw, sn;
-  ip.fromString(AP_IP_ADDR);
-  gw.fromString(AP_GATEWAY);
-  sn.fromString(AP_SUBNET);
-  WiFi.softAPConfig(ip, gw, sn);
-
-  bool ok = WiFi.softAP(
-    WIFI_AP_SSID, WIFI_AP_PASS,
-    WIFI_AP_CHANNEL,
-    0,
-    WIFI_AP_MAX_CONN
-  );
-
-  if (!ok) {
-    Serial.println(F("[WiFi] AP FAILED — перезагрузка через 3 с"));
-    delay(3000); ESP.restart();
+  Serial.print("Connecting to hotspot");
+  while (WiFi.status() != WL_CONNECTED) {
+      delay(500);
+      Serial.print(".");
   }
 
-  Serial.printf("[WiFi] AP  SSID=%-15s  IP=%s\n",
-                WIFI_AP_SSID, WiFi.softAPIP().toString().c_str());
-  Serial.printf("[WiFi] AP  PASS=%-15s  CH=%d\n",
-                WIFI_AP_PASS, WIFI_AP_CHANNEL);
+  Serial.println("");
+  Serial.println("WiFi connected!");
+  Serial.print("ESP32 IP address: ");
+  Serial.println(WiFi.localIP());   // << THIS IS THE IP YOU NEED
 }
 
 void initWebSocket() {

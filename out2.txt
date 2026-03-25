@@ -1,0 +1,8 @@
+Traceback (most recent call last):
+  File "C:\Users\user\Desktop\bilb\test_calculator.py", line 2, in <module>
+    from economist.calculator import calculate
+  File "C:\Users\user\Desktop\bilb\economist\calculator.py", line 40, in <module>
+    from .models import (
+    ...<3 lines>...
+    )
+ModuleNotFoundError: No module named 'economist.models'

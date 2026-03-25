@@ -37,7 +37,7 @@ from .constants import (
     COLOR_DEMOLITION, COLOR_RESTORATION, COLOR_NEUTRAL,
     COLOR_WARNING, COLOR_GRID, COLOR_PAPER, COLOR_TEXT, COLOR_FONT,
 )
-from .models import (
+from .economist_models import (
     DemolitionImpact, RestorationImpact,
     DemolitionFinancials, RestorationFinancials,
     SustainabilityReport,
@@ -130,8 +130,9 @@ def calc_restoration_impact(
     # CO₂ реставрации = fraction от нового строительства
     co2_restoration_t = co2_new_build_t * RESTORATION_CO2_FRACTION
 
-    co2_saved_t  = co2_new_build_t - co2_restoration_t
-    co2_saving_pct = (co2_saved_t / co2_new_build_t * 100.0) if co2_new_build_t > 0 else 0.0
+    co2_saved_t  = (demolition.co2_transport_t + co2_new_build_t) - co2_restoration_t
+    co2_total_demolition_path = demolition.co2_transport_t + co2_new_build_t
+    co2_saving_pct = (co2_saved_t / co2_total_demolition_path * 100.0) if co2_total_demolition_path > 0 else 0.0
 
     # Эквиваленты
     trees_equivalent  = int(co2_saved_t * 1000.0 / CO2_PER_TREE_KG_YR)
@@ -253,10 +254,10 @@ def build_charts(
                 "type":    "bar",
                 "name":    "Demolition + New Build",
                 "x":       ["CO₂ Emissions"],
-                "y":       [round(dem_impact.co2_total_t +
+                "y":       [round(dem_impact.co2_transport_t +
                                   rest_impact.co2_new_build_t, 1)],
                 "marker":  {"color": COLOR_DEMOLITION},
-                "text":    [f"{dem_impact.co2_total_t + rest_impact.co2_new_build_t:.0f}t CO₂"],
+                "text":    [f"{dem_impact.co2_transport_t + rest_impact.co2_new_build_t:.0f}t CO₂"],
                 "textposition": "outside",
             },
             {
