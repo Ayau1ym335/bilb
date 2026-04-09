@@ -29,24 +29,26 @@ void initWiFiAP() {
   WiFi.disconnect(true);
   delay(100);
   WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  WiFi.begin(WIFI_AP_SSID, WIFI_AP_PASS);
 
-  Serial.print("Connecting to hotspot");
+  Serial.print(F("Connecting to hotspot"));
+  unsigned long t = millis();
   while (WiFi.status() != WL_CONNECTED) {
-      delay(500);
-      Serial.print(".");
+    if (millis() - t > 15000) {
+      Serial.println(F("\n[WiFi] Connection failed!"));
+      return;
+    }
+    delay(500);
+    Serial.print('.');
   }
-
-  Serial.println("");
-  Serial.println("WiFi connected!");
-  Serial.print("ESP32 IP address: ");
-  Serial.println(WiFi.localIP());   // << THIS IS THE IP YOU NEED
+  Serial.println();
+  Serial.print(F("[WiFi] Connected — IP: "));
+  Serial.println(WiFi.localIP());
 }
 
 void initWebSocket() {
   s_ws.begin();
   s_ws.onEvent(onWsEvent);
-  s_ws.setReconnectInterval(3000);
   s_ws.enableHeartbeat(5000, 2000, 3);   
   Serial.printf("[WS] Server on port %d\n", WS_PORT);
 }

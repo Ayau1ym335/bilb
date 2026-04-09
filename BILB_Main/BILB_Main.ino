@@ -5,7 +5,7 @@
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
-#include <esp_task_wdt.h>  
+#include <esp_task_wdt.h>
 #include "Config.h"
 
 SensorData      g_sensor     = {};
@@ -99,10 +99,6 @@ void setup() {
   Serial.printf ("║  Building: %-26s║\n", BUILDING_ID);
   Serial.println(F("╚══════════════════════════════════════╝"));
 
-  // ── Watchdog: 30 секунд (перезагрузка если loop зависнет) ───
-  esp_task_wdt_init(30, true);
-  esp_task_wdt_add(NULL);
-
   // ── Индикаторы ───────────────────────────────────────────────
   pinMode(PIN_RGB_R, OUTPUT); pinMode(PIN_RGB_G, OUTPUT);
   pinMode(PIN_RGB_B, OUTPUT); pinMode(PIN_BUZZER, OUTPUT);
@@ -154,9 +150,6 @@ void setup() {
 //  loop()  —  Главный цикл (всё non-blocking)
 // ════════════════════════════════════════════════════════════════
 void loop() {
-  // ── Сброс watchdog (сигнал «я жив») ─────────────────────────
-  esp_task_wdt_reset();
-
   // ── Читаем датчики (каждые IVMS_SENSORS) ─────────────────────
   readAllSensors();
 

@@ -274,16 +274,15 @@ void initMotors() {
   pinMode(PIN_R_IN3, OUTPUT); pinMode(PIN_R_IN4, OUTPUT);
 
 #if MOTORS_USE_PWM
-  ledcSetup(LEDC_L_CH, LEDC_FREQ, LEDC_RES);
-  ledcSetup(LEDC_R_CH, LEDC_FREQ, LEDC_RES);
-  ledcAttachPin(PIN_L_ENA, LEDC_L_CH);
-  ledcAttachPin(PIN_R_ENB, LEDC_R_CH);
+  ledcAttachChannel(PIN_L_ENA, LEDC_FREQ, LEDC_RES, LEDC_L_CH);
+  ledcAttachChannel(PIN_R_ENB, LEDC_FREQ, LEDC_RES, LEDC_R_CH);
   Serial.println(F("[NAV] Motors OK  (PWM mode)"));
 #else
+  pinMode(PIN_L_ENA, OUTPUT); pinMode(PIN_R_ENB, OUTPUT);
+  digitalWrite(PIN_L_ENA, HIGH); digitalWrite(PIN_R_ENB, HIGH);
   Serial.println(F("[NAV] Motors OK  (digital mode)"));
-  Serial.println(F("[NAV] TIP: set MOTORS_USE_PWM=true for speed control"));
 #endif
 
   motorStop();
-  g_pose = { 1.0f, 1.0f, 0.0f };  
+  g_pose = { 1.0f, 1.0f, 0.0f };
 }

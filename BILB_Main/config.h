@@ -51,7 +51,7 @@
 #define WIFI_AP_PASS      "XYZQWERTY"   
 #define WIFI_AP_CHANNEL   6           
 #define WIFI_AP_MAX_CONN  2
-#define WIFI_MODE_AP    false     
+#define WIFI_MODE_AP_MODE    false     
 
 #define AP_IP_ADDR    "192.168.4.1"
 #define AP_GATEWAY    "192.168.4.1"
