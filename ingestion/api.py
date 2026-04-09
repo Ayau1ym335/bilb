@@ -31,7 +31,7 @@ from fastapi import (
     Query, Request, status,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .database import create_tables, get_db, ping_db
@@ -399,7 +399,7 @@ async def calculate_sustainability(
 @app.get(
     "/api/buildings/{building_id}/report",
     summary="Generate full PDF assessment report",
-    response_class=None,  # returns raw bytes
+    response_class=Response,  # returns raw bytes
 )
 async def get_pdf_report(
     building_id: str,
@@ -410,7 +410,6 @@ async def get_pdf_report(
     Требует предварительного вызова /scenarios и /sustainability.
     Возвращает application/pdf для прямого скачивания.
     """
-    from fastapi.responses import Response
     from report import generate_pdf
     from ml import get_status
     from economist import calculate_from_profile

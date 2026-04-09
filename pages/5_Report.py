@@ -339,6 +339,9 @@ def _do_generate(building, sensor_data, ml_result, scenarios,
     except Exception as e:
         st.error(f"PDF generation failed: {e}")
         return None
+
+
+def _agg(readings, latest):
     if not readings:
         return {}
     temps  = [float(r.get("temperature",0) or 0) for r in readings]
@@ -612,7 +615,3 @@ with pv3:
   </div>
 </div>""", unsafe_allow_html=True)
     st.markdown("</div>", unsafe_allow_html=True)
-
-
-# Build aggregated sensor_data for report
-def _agg(readings, latest):
