@@ -86,6 +86,9 @@ async def lifespan(app: FastAPI):
 # ══════════════════════════════════════════════════════════════
 #  App
 # ══════════════════════════════════════════════════════════════
+# Uvicorn reload import path — must match the `app` object below.
+APP_IMPORT_NAME: str = "ingestion.api:app"
+
 app = FastAPI(
     title="BILB Data Ingestion API",
     version="2.1.0",
