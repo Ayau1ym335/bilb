@@ -1,19 +1,3 @@
-"""
-ml/features.py  —  Feature Engineering
-═══════════════════════════════════════
-Единственный источник правды для:
-  · Имён и порядка 13 признаков (FEATURE_COLS)
-  · Пороговых значений (зеркало Config.h прошивки)
-  · Rule-based авторазметки (зеркало profile.ino::assessDegradation)
-  · Преобразования любого входного формата → numpy вектор
-
-Входные форматы:
-  · dict (из БД / API / bridge)
-  · SensorReading ORM-объект
-  · TelemetryPayload Pydantic-объект
-
-▶ Если пороги в прошивке изменились — меняй только здесь.
-"""
 
 from __future__ import annotations
 
@@ -21,10 +5,6 @@ from dataclasses import dataclass
 from typing import Any, Union
 import numpy as np
 
-# ══════════════════════════════════════════════════════════════
-#  Пороги — зеркало Config.h
-#  ▶ НАСТРОЙТЕ: синхронизируй с Config.h если меняешь прошивку
-# ══════════════════════════════════════════════════════════════
 THR_HUMIDITY_CRIT  = 70.0   # %
 THR_HUMIDITY_WARN  = 55.0   # %
 THR_TEMP_CRIT      = 40.0   # °C
@@ -35,15 +15,9 @@ THR_TILT_WARN      = 5.0    # °
 DIST_MAX_CM        = 400.0  # cm — значение «нет препятствия»
 DIST_OBSTACLE_CM   = 25.0   # cm — аварийное расстояние
 
-# Метки классов
 LABEL_NAMES  = {0: "OK", 1: "WARNING", 2: "CRITICAL"}
 LABEL_VALUES = {"OK": 0, "WARNING": 1, "CRITICAL": 2}
 
-# ══════════════════════════════════════════════════════════════
-#  13 признаков — фиксированный порядок
-#  Менять порядок НЕЛЬЗЯ после обучения модели.
-#  Добавлять новые — только в конец + переобучать.
-# ══════════════════════════════════════════════════════════════
 FEATURE_COLS: list[str] = [
     # Экологические (BME280 + BH1750) — 4 признака
     "humidity",       # 0  %
@@ -65,14 +39,7 @@ FEATURE_COLS: list[str] = [
     "dist_right",     # 12 cm
 ]
 
-N_FEATURES = len(FEATURE_COLS)  # 13
-
-
-# ══════════════════════════════════════════════════════════════
-#  Заполнение пропусков (импутация)
-#  Значения по умолчанию при отсутствии поля (graceful degradation).
-#  Выбраны как «нейтральные» — не должны искусственно влиять на класс.
-# ══════════════════════════════════════════════════════════════
+N_FEATURES = len(FEATURE_COLS)  
 _FILL_DEFAULTS: dict[str, float] = {
     "humidity":    50.0,    # средняя влажность
     "temperature": 20.0,    # комнатная температура
@@ -90,20 +57,10 @@ _FILL_DEFAULTS: dict[str, float] = {
 }
 
 
-# ══════════════════════════════════════════════════════════════
-#  Извлечение сырых значений из любого источника
-# ══════════════════════════════════════════════════════════════
 def _extract_raw(reading: Any) -> dict[str, Any]:
-    """
-    Универсальный экстрактор: dict / ORM SensorReading / TelemetryPayload.
-    Возвращает плоский dict с именами полей = FEATURE_COLS.
-    """
-    # ── dict (из API, bridge, демо-генератора) ────────────────
     if isinstance(reading, dict):
         return reading
 
-    # ── TelemetryPayload (Pydantic) ───────────────────────────
-    # Определяем по наличию атрибута 'env' (субструктура)
     if hasattr(reading, "env"):
         env  = reading.env
         st   = reading.str_
@@ -123,7 +80,6 @@ def _extract_raw(reading: Any) -> dict[str, Any]:
             "dist_right":  dist.r if dist else None,
         }
 
-    # ── SensorReading ORM (поля напрямую) ────────────────────
     return {
         "humidity":    getattr(reading, "humidity",    None),
         "temperature": getattr(reading, "temperature", None),
@@ -141,17 +97,12 @@ def _extract_raw(reading: Any) -> dict[str, Any]:
 
 
 def _cap_dist(v: float | None) -> float:
-    """999 (нет препятствия) → DIST_MAX_CM; None → default."""
     if v is None:
         return DIST_MAX_CM
     return min(float(v), DIST_MAX_CM)
 
 
 def extract_features(reading: Any) -> np.ndarray:
-    """
-    reading → numpy вектор формы (13,).
-    Безопасен к любым None / отсутствующим полям.
-    """
     raw = _extract_raw(reading)
 
     roll  = float(raw.get("tilt_roll")  or 0.0)
@@ -181,11 +132,6 @@ def extract_features_batch(readings: list[Any]) -> np.ndarray:
     return np.stack([extract_features(r) for r in readings], axis=0)
 
 
-# ══════════════════════════════════════════════════════════════
-#  Rule-based авторазметка
-#  ТОЧНОЕ зеркало profile.ino::assessDegradation()
-#  Порядок операций: score → clamp(0,100) → escalate status
-# ══════════════════════════════════════════════════════════════
 @dataclass
 class RuleResult:
     label:  int    # 0=OK, 1=WARNING, 2=CRITICAL
@@ -195,13 +141,6 @@ class RuleResult:
 
 
 def rule_label(reading: Any) -> RuleResult:
-    """
-    Детерминированная разметка по правилам прошивки.
-    Используется для:
-      1. Авторазметки обучающих данных (нет ground truth)
-      2. MockClassifier пока модель не обучена
-      3. Валидации предсказаний RF
-    """
     raw    = _extract_raw(reading)
     score  = 0.0
     status = "OK"
@@ -215,14 +154,6 @@ def rule_label(reading: Any) -> RuleResult:
     vib  = bool(raw.get("vibration") or False)
     max_tilt = max(roll, ptch)
 
-    # ── Зеркало profile.ino::assessDegradation() ─────────────
-    # Некоторые блоки ставят status напрямую (=),
-    # другие только повышают: if (status < X) status = X.
-    # Порядок строго совпадает с прошивкой.
-
-    # ── Local helper: raise status only, never downgrade ─────────
-    # String comparison ("CRITICAL" < "OK" < "WARNING" alphabetically)
-    # is the INVERSE of semantic severity — always use numeric LABEL_VALUES.
     def _raise(new: str) -> str:
         return new if LABEL_VALUES[new] > LABEL_VALUES[status] else status
 
@@ -236,13 +167,13 @@ def rule_label(reading: Any) -> RuleResult:
         status = _raise("WARNING")             # только повышаем
         issues.append("ELEVATED_HUMIDITY")
 
-    # Вибрация + комбо
+    # ml/features.py — vibration + humidity combination
     if vib:
         score += 25.0
         issues.append("VIBRATION_DETECTED")
         if h >= THR_HUMIDITY_CRIT:
-            score += 15.0
-            status = "CRITICAL"                # прямое присвоение
+            score += 15.0  # extra penalty for the combination
+            status = "CRITICAL"              # direct override, not gradual raise
             issues.append("STRUCTURAL_RISK_COMBO")
         else:
             status = _raise("WARNING")
@@ -259,7 +190,7 @@ def rule_label(reading: Any) -> RuleResult:
     # Наклон
     if max_tilt >= THR_TILT_CRIT:
         score += 35.0
-        status = "CRITICAL"                    # прямое присвоение
+        status = "CRITICAL"                 
         issues.append("CRITICAL_STRUCTURAL_TILT")
     elif max_tilt >= THR_TILT_WARN:
         score += 12.0
@@ -271,9 +202,6 @@ def rule_label(reading: Any) -> RuleResult:
         score += 5.0
         issues.append("POOR_DAYLIGHTING")
 
-    # ── score = constrain(score, 0, 100)  FIRST ───────────────
-    # ── затем эскалация ТОЛЬКО из нижних состояний ───────────
-    # (строки 69-71 прошивки)
     score = min(score, 100.0)
 
     if status == "OK"      and score >= 30.0:

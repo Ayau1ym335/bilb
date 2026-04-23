@@ -105,8 +105,11 @@ static void flushBuffer() {
 //  Вызывается из Profile.ino::generateProfile()
 // ════════════════════════════════════════════════════════════════
 void httpPostTelemetry(const char* json, size_t len) {
-  // Нет Wi-Fi соединения вообще — не пытаемся
-  if (WiFi.status() != WL_CONNECTED) {
+  // In AP mode the robot is the hotspot; WL_CONNECTED is for STA.
+  // We can still reach HTTP_BACKEND_URL if a client connected and
+  // the backend runs on that client. Skip the send if no station
+  // is associated (no one to route the packet through).
+  if (WiFi.softAPgetStationNum() == 0) {
     writeToBuffer(json, len);
     return;
   }

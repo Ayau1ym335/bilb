@@ -1,24 +1,3 @@
-"""
-ml/classifier.py  —  Diagnostics Engine (Движок 1)
-════════════════════════════════════════════════════
-Публичный API:
-    get_status(reading) → PredictionResult
-    get_classifier()    → BILBClassifier (singleton)
-
-Классы:
-    MockClassifier    — работает без обученной модели
-    BILBClassifier    — Random Forest; train(), predict(), save/load
-
-Жизненный цикл:
-    1. При старте: get_classifier() → пробует загрузить модель с диска
-    2. Если модели нет → возвращает MockClassifier прозрачно
-    3. Оператор вызывает train() → модель сохраняется → следующий
-       get_status() уже использует RF
-
-Запуск обучения из CLI:
-    python -m ml.classifier --train [--min-samples 200]
-"""
-
 from __future__ import annotations
 
 import logging
@@ -36,20 +15,14 @@ from .features import (
 
 log = logging.getLogger("bilb.ml")
 
-# ── Пути к артефактам модели ──────────────────────────────────
 MODEL_DIR   = Path(os.getenv("MODEL_DIR", "data/models"))
 MODEL_PATH  = MODEL_DIR / "rf_model.joblib"
 SCALER_PATH = MODEL_DIR / "rf_scaler.joblib"
 META_PATH   = MODEL_DIR / "rf_meta.json"
 
-# ── Минимум примеров для обучения ────────────────────────────
-# ▶ НАСТРОЙТЕ: меньше — быстро, но модель слабая
 MIN_SAMPLES_PER_CLASS = 20
 
 
-# ══════════════════════════════════════════════════════════════
-#  Результат предсказания
-# ══════════════════════════════════════════════════════════════
 @dataclass
 class PredictionResult:
     status:        str                   # "OK" / "WARNING" / "CRITICAL"
@@ -62,25 +35,10 @@ class PredictionResult:
     rule_status:   str                   # статус по правилам (для сравнения)
     features_used: int = N_FEATURES
 
-
-# ══════════════════════════════════════════════════════════════
-#  MockClassifier  —  фронтенд работает без обученного RF
-# ══════════════════════════════════════════════════════════════
 class MockClassifier:
-    """
-    Возвращает результат rule-based алгоритма + симулированную уверенность.
-    Полностью совместим с интерфейсом BILBClassifier.predict().
-    Используется:
-      · пока модель не обучена
-      · в demo-режиме
-      · как baseline для сравнения
-    """
-
     def predict(self, reading: Any) -> PredictionResult:
         rule = rule_label(reading)
 
-        # Имитируем вероятности: предсказанный класс получает 0.70–0.85,
-        # остальные делят остаток пропорционально близости к границе
         rng         = np.random.default_rng(seed=int(rule.score * 100))
         confidence  = float(rng.uniform(0.68, 0.86))
         other_total = 1.0 - confidence
@@ -89,8 +47,7 @@ class MockClassifier:
 
         proba = [0.0, 0.0, 0.0]
         proba[rule.label] = confidence
-        # Distribute the remainder across the two non-predicted slots.
-        # other_a + other_b = other_total = 1 - confidence, so sum stays 1.0.
+      
         others = [i for i in range(3) if i != rule.label]
         proba[others[0]] = other_a
         proba[others[1]] = other_b
@@ -114,22 +71,7 @@ class MockClassifier:
     def is_trained(self) -> bool:
         return False
 
-
-# ══════════════════════════════════════════════════════════════
-#  BILBClassifier  —  Random Forest
-# ══════════════════════════════════════════════════════════════
 class BILBClassifier:
-    """
-    Обёртка над sklearn RandomForestClassifier.
-
-    Особенности:
-      · StandardScaler для нормализации (RF не требует, но улучшает
-        совместимость если позже добавим градиентный бустинг)
-      · class_weight="balanced" — CRITICAL-примеров всегда меньше
-      · Авторазметка через rule_label() если нет колонки 'label'
-      · Сохранение/загрузка всей тройки: модель + скейлер + метаданные
-    """
-
     def __init__(self) -> None:
         self._model:     Any = None
         self._scaler:    Any = None
@@ -138,11 +80,7 @@ class BILBClassifier:
         self._mock:      MockClassifier = MockClassifier()
         self._load()
 
-    # ──────────────────────────────────────────────────────────
-    #  Persistence
-    # ──────────────────────────────────────────────────────────
     def _load(self) -> None:
-        """Загружает модель с диска если существует."""
         if not (MODEL_PATH.exists() and SCALER_PATH.exists()):
             log.info("[ML] No saved model found — using MockClassifier")
             return
@@ -164,7 +102,6 @@ class BILBClassifier:
             self._trained = False
 
     def _save(self, metrics: dict) -> None:
-        """Сохраняет модель, скейлер и метаданные."""
         import joblib, json
         MODEL_DIR.mkdir(parents=True, exist_ok=True)
         joblib.dump(self._model,  MODEL_PATH)
@@ -175,9 +112,6 @@ class BILBClassifier:
     def is_trained(self) -> bool:
         return self._trained
 
-    # ──────────────────────────────────────────────────────────
-    #  Training
-    # ──────────────────────────────────────────────────────────
     def train(
         self,
         readings: list[Any],
@@ -189,28 +123,6 @@ class BILBClassifier:
         test_size:         float = 0.20,
         random_state:      int  = 42,
     ) -> dict:
-        """
-        Обучает Random Forest на списке readings (dict / ORM / Pydantic).
-
-        1. Извлекает признаки через extract_features_batch()
-        2. Размечает через rule_label() если нет поля 'label'/'status'
-        3. Проверяет баланс классов
-        4. Обучает RF + StandardScaler
-        5. Возвращает полный отчёт метрик
-
-        Параметры:
-          readings         — список любых поддерживаемых форматов
-          save             — сохранять ли модель на диск
-          n_estimators     — деревьев в лесу ▶ НАСТРОЙТЕ (200 = хороший баланс)
-          max_depth        — глубина дерева  ▶ НАСТРОЙТЕ (None = без ограничения)
-          min_samples_leaf — мин. примеров в листе (защита от переобучения)
-          test_size        — доля тестовой выборки
-          random_state     — воспроизводимость
-
-        Возвращает dict с ключами:
-          accuracy, per_class, feature_importance, n_samples,
-          class_distribution, confusion_matrix
-        """
         from sklearn.ensemble import RandomForestClassifier
         from sklearn.model_selection import train_test_split, StratifiedKFold
         from sklearn.preprocessing import StandardScaler
@@ -223,13 +135,10 @@ class BILBClassifier:
 
         log.info("[ML] Extracting features from %d readings...", len(readings))
 
-        # ── Матрица признаков ─────────────────────────────────
         X = extract_features_batch(readings)   # (N, 13)
 
-        # ── Метки: берём из 'label' / 'status' или авторазмечаем ──
         labels: list[int] = []
         for r in readings:
-            # Если в dict / ORM уже есть label или status
             lbl = None
             if isinstance(r, dict):
                 if "label" in r:
@@ -247,7 +156,6 @@ class BILBClassifier:
 
         y = np.array(labels, dtype=np.int32)
 
-        # ── Проверка баланса классов ──────────────────────────
         unique, counts = np.unique(y, return_counts=True)
         class_dist = {LABEL_NAMES[int(u)]: int(c) for u, c in zip(unique, counts)}
         log.info("[ML] Class distribution: %s", class_dist)
@@ -260,7 +168,6 @@ class BILBClassifier:
                 rare, MIN_SAMPLES_PER_CLASS
             )
 
-        # ── Train/test split стратифицированный ───────────────
         X_tr, X_te, y_tr, y_te = train_test_split(
             X, y,
             test_size    = test_size,
@@ -268,12 +175,10 @@ class BILBClassifier:
             random_state = random_state,
         )
 
-        # ── Масштабирование ───────────────────────────────────
         self._scaler = StandardScaler()
         X_tr_s = self._scaler.fit_transform(X_tr)
         X_te_s = self._scaler.transform(X_te)
 
-        # ── Random Forest ─────────────────────────────────────
         self._model = RandomForestClassifier(
             n_estimators     = n_estimators,
             max_depth        = max_depth,
@@ -286,7 +191,6 @@ class BILBClassifier:
         self._model.fit(X_tr_s, y_tr)
         self._trained = True
 
-        # ── Метрики ───────────────────────────────────────────
         y_pred     = self._model.predict(X_te_s)
         acc        = accuracy_score(y_te, y_pred)
         oob        = float(self._model.oob_score_)
@@ -298,7 +202,6 @@ class BILBClassifier:
         )
         cm = confusion_matrix(y_te, y_pred, labels=[0, 1, 2]).tolist()
 
-        # Важность признаков — отсортированная
         importances = self._model.feature_importances_
         feat_imp = {
             col: round(float(imp), 4)
@@ -342,14 +245,7 @@ class BILBClassifier:
 
         return metrics
 
-    # ──────────────────────────────────────────────────────────
-    #  Inference
-    # ──────────────────────────────────────────────────────────
     def predict(self, reading: Any) -> PredictionResult:
-        """
-        reading → PredictionResult.
-        Если модель не обучена — делегирует MockClassifier.
-        """
         if not self._trained:
             return self._mock.predict(reading)
 
@@ -359,13 +255,10 @@ class BILBClassifier:
         label      = int(self._model.predict(X_s)[0])
         proba_arr  = self._model.predict_proba(X_s)[0]   # shape (3,)
 
-        # score: взвешенная комбинация вероятностей
-        # 0*P(OK) + 50*P(WARNING) + 100*P(CRITICAL)
         score = float(0.0 * proba_arr[0] +
                       50.0 * proba_arr[1] +
                       100.0 * proba_arr[2])
 
-        # Добавляем issues из rule-based для контекста в отчёте
         rule = rule_label(reading)
 
         return PredictionResult(
@@ -383,7 +276,6 @@ class BILBClassifier:
         )
 
     def predict_batch(self, readings: list[Any]) -> list[PredictionResult]:
-        """Батч-предсказание: эффективнее N отдельных predict()."""
         if not self._trained:
             return [self._mock.predict(r) for r in readings]
 

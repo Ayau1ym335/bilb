@@ -1,21 +1,3 @@
-"""
-ingestion/api.py  —  FastAPI Application
-═════════════════════════════════════════
-Эндпоинты:
-  POST /api/telemetry              — приём JSON от ESP32
-  GET  /api/telemetry/{building}   — последние N записей
-  GET  /api/telemetry/{building}/latest — одна свежая запись
-  POST /api/buildings              — регистрация здания
-  GET  /api/buildings              — список зданий
-  GET  /api/buildings/{id}         — профиль здания
-  POST /api/sessions/{id}/close    — закрыть сессию
-  GET  /api/heatmap/{building}     — тепловая карта
-  GET  /health                     — health check
-
-▶ НАСТРОЙТЕ:
-  AGGREGATE_EVERY_N = 10  — как часто пересчитывать агрегаты
-  API_KEY             — секрет для заголовка X-API-Key (опционально)
-"""
 
 from __future__ import annotations
 
@@ -65,15 +47,11 @@ log = logging.getLogger("bilb.api")
 
 # ── Конфигурация ──────────────────────────────────────────────
 AGGREGATE_EVERY_N: int = int(os.getenv("AGGREGATE_EVERY_N", "10"))
-API_KEY: Optional[str] = os.getenv("BILB_API_KEY")    # ▶ НАСТРОЙТЕ если нужна auth
-
+API_KEY: Optional[str] = os.getenv("BILB_API_KEY")   
 # Счётчик записей для триггера агрегации
 _ingest_counter: dict[str, int] = {}
 
 
-# ══════════════════════════════════════════════════════════════
-#  Lifespan — инициализация и shutdown
-# ══════════════════════════════════════════════════════════════
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     log.info("BILB API starting up...")
@@ -82,11 +60,6 @@ async def lifespan(app: FastAPI):
     yield
     log.info("BILB API shutting down")
 
-
-# ══════════════════════════════════════════════════════════════
-#  App
-# ══════════════════════════════════════════════════════════════
-# Uvicorn reload import path — must match the `app` object below.
 APP_IMPORT_NAME: str = "ingestion.api:app"
 
 app = FastAPI(
@@ -98,37 +71,30 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
-# CORS — разрешаем Streamlit (localhost:8501) и control.html
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://localhost:8501",    # Streamlit
+        "http://localhost:8501",    
         "http://127.0.0.1:8501",
-        "http://192.168.4.2:8501",  # ▶ НАСТРОЙТЕ: IP вашего ноутбука в сети робота
-        "*",                         # Убери в продакшне
+        "http://192.168.4.2:8501",  
+        "*",                      
     ],
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
-# ══════════════════════════════════════════════════════════════
-#  Middleware — логирование времени запросов
-# ══════════════════════════════════════════════════════════════
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     t0 = time.perf_counter()
     response = await call_next(request)
     ms = (time.perf_counter() - t0) * 1000
-    if request.url.path != "/health":   # health спам не логируем
+    if request.url.path != "/health":   
         log.debug("%s %s → %d  (%.1fms)",
                   request.method, request.url.path, response.status_code, ms)
     return response
 
 
-# ══════════════════════════════════════════════════════════════
-#  Auth dependency (опциональный API key)
-# ══════════════════════════════════════════════════════════════
 async def verify_api_key(x_api_key: Optional[str] = Header(None)):
     if API_KEY and x_api_key != API_KEY:
         raise HTTPException(
@@ -137,9 +103,6 @@ async def verify_api_key(x_api_key: Optional[str] = Header(None)):
         )
 
 
-# ══════════════════════════════════════════════════════════════
-#  POST /api/telemetry  —  ГЛАВНЫЙ ЭНДПОИНТ
-# ══════════════════════════════════════════════════════════════
 @app.post(
     "/api/telemetry",
     response_model=TelemetryIngestResponse,
@@ -152,30 +115,21 @@ async def ingest_telemetry(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ) -> TelemetryIngestResponse:
-    """
-    Принимает JSON-пакет от ESP32 (формат из Profile.ino::serializeToJson).
-    Сохраняет в sensor_readings с привязкой к координатам (x, y).
-    Периодически обновляет агрегаты в building_profiles.
-    """
-    # Сохраняем raw JSON для отладки (опционально)
     raw = None
     try:
         body = await request.body()
-        raw = body.decode("utf-8", errors="replace")[:2000]   # ▶ НАСТРОЙТЕ: лимит raw
+        raw = body.decode("utf-8", errors="replace")[:2000]  
     except Exception:
         pass
 
-    # Получить или создать сессию сканирования
     scan_session = await get_or_create_session(
         db, payload.building_id, fw_version=payload.v
     )
 
-    # Сохранить запись
     reading = await insert_reading(
         db, payload, session_id=scan_session.id, raw_json=raw
     )
 
-    # Триггер агрегации каждые AGGREGATE_EVERY_N записей
     bid = payload.building_id
     _ingest_counter[bid] = _ingest_counter.get(bid, 0) + 1
 
@@ -191,10 +145,6 @@ async def ingest_telemetry(
         score      = reading.score,
     )
 
-
-# ══════════════════════════════════════════════════════════════
-#  GET /api/telemetry/{building_id}
-# ══════════════════════════════════════════════════════════════
 @app.get(
     "/api/telemetry/{building_id}",
     response_model=list[SensorReadingOut],
@@ -209,9 +159,6 @@ async def get_readings(
     return await get_latest_readings(db, building_id, limit=limit, offset=offset)
 
 
-# ══════════════════════════════════════════════════════════════
-#  GET /api/telemetry/{building_id}/latest
-# ══════════════════════════════════════════════════════════════
 @app.get(
     "/api/telemetry/{building_id}/latest",
     response_model=SensorReadingOut,
@@ -229,10 +176,6 @@ async def get_latest(
         )
     return r
 
-
-# ══════════════════════════════════════════════════════════════
-#  POST /api/buildings  —  Регистрация объекта
-# ══════════════════════════════════════════════════════════════
 @app.post(
     "/api/buildings",
     response_model=BuildingProfileOut,

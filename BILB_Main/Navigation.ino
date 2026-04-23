@@ -24,8 +24,10 @@ static void setMotorRaw(bool lFwd, bool lBwd, bool rFwd, bool rBwd,
   digitalWrite(PIN_R_IN4, rBwd ? HIGH : LOW);
 
 #if MOTORS_USE_PWM
-  uint8_t sL = (lFwd || lBwd) ? speedL : 0;
-  uint8_t sR = (rFwd || rBwd) ? speedR : 0;
+  // Apply dead-zone: if a motor is supposed to move but the requested
+  // speed is below the stall threshold, clamp it up to MOTOR_DEAD_ZONE.
+  uint8_t sL = (lFwd || lBwd) ? max(speedL, (uint8_t)MOTOR_DEAD_ZONE) : 0;
+  uint8_t sR = (rFwd || rBwd) ? max(speedR, (uint8_t)MOTOR_DEAD_ZONE) : 0;
   ledcWrite(LEDC_L_CH, sL);
   ledcWrite(LEDC_R_CH, sR);
 #endif
@@ -142,9 +144,10 @@ void reactiveAvoid() {
       return;
     }
     // Pause expired, obstacle still present: choose turn direction
+    // Turn toward the side with MORE clearance
     s_avoidPauseUntil = 0;
-    (l > r) ? motorTurnLeft(MOTOR_SPEED_TURN)
-            : motorTurnRight(MOTOR_SPEED_TURN);
+    (l >= r) ? motorTurnLeft(MOTOR_SPEED_TURN)
+             : motorTurnRight(MOTOR_SPEED_TURN);
     return;
   }
   s_avoidPauseUntil = 0;
@@ -274,8 +277,21 @@ void initMotors() {
   pinMode(PIN_R_IN3, OUTPUT); pinMode(PIN_R_IN4, OUTPUT);
 
 #if MOTORS_USE_PWM
+  // ESP32 Arduino core v3+ uses ledcAttach(pin, freq, resolution)
+  // Earlier cores use ledcSetup + ledcAttachPin.
+  // ledcAttachChannel works on both if available; fall back otherwise.
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+  ledcAttach(PIN_L_ENA, LEDC_FREQ, LEDC_RES);
+  ledcAttach(PIN_R_ENB, LEDC_FREQ, LEDC_RES);
+  // Re-map channel numbers so ledcWrite still works
   ledcAttachChannel(PIN_L_ENA, LEDC_FREQ, LEDC_RES, LEDC_L_CH);
   ledcAttachChannel(PIN_R_ENB, LEDC_FREQ, LEDC_RES, LEDC_R_CH);
+#else
+  ledcSetup(LEDC_L_CH, LEDC_FREQ, LEDC_RES);
+  ledcSetup(LEDC_R_CH, LEDC_FREQ, LEDC_RES);
+  ledcAttachPin(PIN_L_ENA, LEDC_L_CH);
+  ledcAttachPin(PIN_R_ENB, LEDC_R_CH);
+#endif
   Serial.println(F("[NAV] Motors OK  (PWM mode)"));
 #else
   pinMode(PIN_L_ENA, OUTPUT); pinMode(PIN_R_ENB, OUTPUT);

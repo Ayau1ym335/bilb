@@ -28,22 +28,24 @@ extern void setRobotState(RobotState s);
 void initWiFiAP() {
   WiFi.disconnect(true);
   delay(100);
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_AP_SSID, WIFI_AP_PASS);
+  WiFi.mode(WIFI_AP);
 
-  Serial.print(F("Connecting to hotspot"));
-  unsigned long t = millis();
-  while (WiFi.status() != WL_CONNECTED) {
-    if (millis() - t > 15000) {
-      Serial.println(F("\n[WiFi] Connection failed!"));
-      return;
-    }
-    delay(500);
-    Serial.print('.');
+  IPAddress ip, gw, sn;
+  ip.fromString(AP_IP_ADDR);
+  gw.fromString(AP_GATEWAY);
+  sn.fromString(AP_SUBNET);
+  WiFi.softAPConfig(ip, gw, sn);
+
+  bool ok = WiFi.softAP(WIFI_AP_SSID, WIFI_AP_PASS,
+                         WIFI_AP_CHANNEL, 0, WIFI_AP_MAX_CONN);
+  if (ok) {
+    Serial.print(F("[WiFi] AP started  SSID="));
+    Serial.print(WIFI_AP_SSID);
+    Serial.print(F("  IP="));
+    Serial.println(WiFi.softAPIP());
+  } else {
+    Serial.println(F("[WiFi] softAP failed!"));
   }
-  Serial.println();
-  Serial.print(F("[WiFi] Connected — IP: "));
-  Serial.println(WiFi.localIP());
 }
 
 void initWebSocket() {

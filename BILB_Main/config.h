@@ -47,11 +47,11 @@
 #define OLED_H   64
 #define OLED_RESET -1
 
-#define WIFI_AP_SSID      "Ayau" 
-#define WIFI_AP_PASS      "XYZQWERTY"   
+#define WIFI_AP_SSID      "BILB_Robot"      // SSID that the robot broadcasts
+#define WIFI_AP_PASS      "XYZQWERTY"        // Connect your phone/PC to this
 #define WIFI_AP_CHANNEL   6           
 #define WIFI_AP_MAX_CONN  2
-#define WIFI_MODE_AP_MODE    false     
+#define WIFI_MODE_AP_MODE    true      // Robot runs as Access Point
 
 #define AP_IP_ADDR    "192.168.4.1"
 #define AP_GATEWAY    "192.168.4.1"
